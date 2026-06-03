@@ -1,0 +1,24 @@
+[package]
+name = "mynote-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "MyNote core: vault I/O, parsing, indexing, search, embeddings"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+pulldown-cmark = "0.13.4"
+serde_yaml_ng = "0.10.0"
+blake3 = "1.8.5"
+walkdir = "2.5.0"
+regex = "1.12.3"
+tempfile = "3.27.0"
+rusqlite = { version = "0.40.0", features = ["bundled", "hooks"] }
+sqlite-vec = "=0.1.9"
+fastembed = "5.15.0"
+notify = "8.2.0"
+notify-debouncer-full = "0.7.0"

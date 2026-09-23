@@ -73,6 +73,31 @@ pub fn embed_all(conn: &Connection, embedder: &Embedder) -> Result<usize> {
     Ok(total)
 }
 
+/// Notes that have content but no embeddings yet (new, or edited since they
+/// were last embedded — the indexer drops chunks when content changes).
+pub fn pending_notes(conn: &Connection) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT n.id FROM notes n
+         WHERE n.materialized = 1 AND trim(n.body) != ''
+           AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.note_id = n.id)
+         ORDER BY n.mtime DESC",
+    )?;
+    let ids = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<std::result::Result<Vec<i64>, _>>()?;
+    Ok(ids)
+}
+
+/// Embed only what's missing (see [`pending_notes`]). Returns chunks embedded.
+pub fn embed_pending(conn: &Connection, embedder: &Embedder) -> Result<usize> {
+    ensure_semantic(conn, embedder.dim() as u32)?;
+    let mut total = 0;
+    for id in pending_notes(conn)? {
+        total += index_note_embeddings(conn, embedder, id)?;
+    }
+    Ok(total)
+}
+
 /// Cosine similarity from a sqlite-vec L2 distance over normalized vectors.
 fn score_from_distance(distance: f64) -> f64 {
     1.0 - (distance * distance) / 2.0
@@ -252,6 +277,21 @@ mod tests {
             .query_row("SELECT count(*) FROM chunks WHERE note_id=?1", [note_id], |r| r.get(0))
             .unwrap();
         assert_eq!(vec_rows, chunk_rows, "vectors stay in sync with chunks");
+    }
+
+    #[test]
+    fn pending_notes_tracks_what_needs_embedding() {
+        let (dir, conn, embedder) = setup(); // setup() embeds everything
+        assert!(pending_notes(&conn).unwrap().is_empty());
+
+        // Editing a note drops its chunks → it becomes pending again.
+        fs::write(dir.path().join("finance.md"), "# Finance\n\nnew quarterly numbers").unwrap();
+        index::reindex_all(&conn, dir.path()).unwrap();
+        let finance = index::note_id_by_path(&conn, "finance.md").unwrap().unwrap();
+        assert_eq!(pending_notes(&conn).unwrap(), vec![finance]);
+
+        index_note_embeddings(&conn, &embedder, finance).unwrap();
+        assert!(pending_notes(&conn).unwrap().is_empty());
     }
 
     #[test]

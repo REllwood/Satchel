@@ -1,6 +1,7 @@
 //! App-held state: the currently open vault and its connections.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 
 use mynote_core::embed::Embedder;
@@ -14,7 +15,7 @@ pub struct Vault {
     pub conn: Connection,
     /// `query_only` + authorizer connection for the in-app query view.
     pub query_conn: Connection,
-    /// Loaded on first semantic use (model load is not free).
+    /// Loaded by the background semantic indexer (model load is not free).
     pub embedder: Option<Embedder>,
     /// RAII guard: held only to keep the file watcher alive; dropped (stopping
     /// the watch) when the vault is replaced or closed.
@@ -23,7 +24,20 @@ pub struct Vault {
 }
 
 /// Tauri-managed application state.
-#[derive(Default)]
 pub struct AppState {
     pub vault: Mutex<Option<Vault>>,
+    /// The bundled embedding model, resolved from the app's resources.
+    pub model_dir: PathBuf,
+    /// True while the background semantic indexer is running.
+    pub embedding: AtomicBool,
+}
+
+impl AppState {
+    pub fn new(model_dir: PathBuf) -> Self {
+        Self {
+            vault: Mutex::new(None),
+            model_dir,
+            embedding: AtomicBool::new(false),
+        }
+    }
 }

@@ -98,12 +98,64 @@ fn is_markdown(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn mtime_ms(meta: &fs::Metadata) -> i64 {
+/// Modification time in unix milliseconds (0 if unavailable).
+pub fn mtime_ms(meta: &fs::Metadata) -> i64 {
     meta.modified()
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// True when a file's contents are evicted to the cloud (iCloud Drive on
+/// macOS 14+, Google Drive "stream" mode and other File Provider folders).
+/// Checking the `SF_DATALESS` flag via `stat` never triggers a download —
+/// unlike reading the file, which makes macOS fetch it.
+#[cfg(target_os = "macos")]
+pub fn is_dataless(meta: &fs::Metadata) -> bool {
+    use std::os::macos::fs::MetadataExt;
+    const SF_DATALESS: u32 = 0x4000_0000;
+    meta.st_flags() & SF_DATALESS != 0
+}
+
+/// Windows cloud placeholders (OneDrive Files On-Demand, iCloud for Windows)
+/// are recalled from the cloud on first read.
+#[cfg(windows)]
+pub fn is_dataless(meta: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
+    const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    meta.file_attributes() & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+pub fn is_dataless(_meta: &fs::Metadata) -> bool {
+    false
+}
+
+/// Let this process download a cloud-only file when it reads one. macOS
+/// decides per process; apps launched from the Dock allow it, but processes
+/// started by agents or launchd may not and would get EDEADLK instead. The
+/// scanner never reads dataless files, so this only affects explicit reads.
+pub fn allow_cloud_downloads() {
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn setiopolicy_np(iotype: i32, scope: i32, policy: i32) -> i32;
+        }
+        const IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES: i32 = 3;
+        const IOPOL_SCOPE_PROCESS: i32 = 0;
+        const IOPOL_MATERIALIZE_DATALESS_FILES_ON: i32 = 2;
+        // SAFETY: plain libSystem call with constant arguments; it only
+        // changes this process's I/O policy.
+        unsafe {
+            setiopolicy_np(
+                IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES,
+                IOPOL_SCOPE_PROCESS,
+                IOPOL_MATERIALIZE_DATALESS_FILES_ON,
+            );
+        }
+    }
 }
 
 fn rel_path_str(root: &Path, abs: &Path) -> Option<String> {
@@ -148,16 +200,16 @@ pub fn scan_vault(root: &Path) -> Vec<ScannedNote> {
         };
 
         let meta = entry.metadata().ok();
+        // Modern cloud placeholders keep the real name but have no local data.
+        let materialized = materialized && !meta.as_ref().is_some_and(is_dataless);
         let note = ScannedNote {
             rel_path: rel.clone(),
             abs_path: logical_abs,
             materialized,
             mtime_ms: meta.as_ref().map(mtime_ms).unwrap_or(0),
-            size: if materialized {
-                meta.as_ref().map(|m| m.len()).unwrap_or(0)
-            } else {
-                0
-            },
+            // Dataless files still report their logical size, which lets the
+            // indexer recognise them as unchanged without downloading.
+            size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
         };
 
         // Materialized wins over a placeholder for the same logical path.
@@ -201,6 +253,29 @@ pub fn list_by_ext(root: &Path, ext: &str) -> Vec<String> {
             .map(|e| e.eq_ignore_ascii_case(ext))
             .unwrap_or(false);
         if matches {
+            if let Some(rel) = rel_path_str(root, entry.path()) {
+                out.push(rel);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// List the vault's folders ("notebooks") as relative paths, including empty
+/// ones. Skips hidden/config dirs and the top-level `attachments` folder.
+pub fn list_dirs(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let walker = WalkDir::new(root).follow_links(false).min_depth(1).into_iter();
+    for entry in walker.filter_entry(|e| {
+        let name = e.file_name().to_string_lossy();
+        !(e.file_type().is_dir()
+            && (SKIP_DIRS.contains(&name.as_ref())
+                || name.starts_with('.')
+                || (e.depth() == 1 && name == "attachments")))
+    }) {
+        let Ok(entry) = entry else { continue };
+        if entry.file_type().is_dir() {
             if let Some(rel) = rel_path_str(root, entry.path()) {
                 out.push(rel);
             }
@@ -274,6 +349,29 @@ mod tests {
     fn content_hash_is_stable_and_distinct() {
         assert_eq!(content_hash(b"abc"), content_hash(b"abc"));
         assert_ne!(content_hash(b"abc"), content_hash(b"abd"));
+    }
+
+    #[test]
+    fn list_dirs_includes_empty_folders_but_not_hidden_or_attachments() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("Work/Projects")).unwrap();
+        fs::create_dir_all(root.join("Personal")).unwrap();
+        fs::create_dir_all(root.join("attachments")).unwrap();
+        fs::create_dir_all(root.join(".mynote")).unwrap();
+        fs::create_dir_all(root.join(".obsidian")).unwrap();
+        assert_eq!(
+            list_dirs(root),
+            vec!["Personal".to_string(), "Work".into(), "Work/Projects".into()]
+        );
+    }
+
+    #[test]
+    fn regular_files_are_not_dataless() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.md");
+        write(&path, "hi");
+        assert!(!is_dataless(&fs::metadata(&path).unwrap()));
     }
 
     #[test]

@@ -7,6 +7,9 @@ use std::process::Command;
 fn mynote(vault: &std::path::Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_mynote"));
     cmd.arg("--vault").arg(vault);
+    // Keep the per-machine index inside the test's temp dir (a hidden folder
+    // the scanner ignores), never in the user's real app-data folder.
+    cmd.env("MYNOTE_DATA_DIR", vault.join(".mynote-test-data"));
     cmd
 }
 

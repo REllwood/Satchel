@@ -6,6 +6,7 @@
 //!   2. an authorizer that allows only SELECT/READ/FUNCTION (denies
 //!      INSERT/UPDATE/DELETE/DDL/PRAGMA/ATTACH/…),
 //!   3. a post-prepare `Statement::readonly()` assertion.
+//!
 //! Results are capped at `max_rows`.
 
 use std::path::Path;

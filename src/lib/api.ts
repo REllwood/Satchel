@@ -4,9 +4,36 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type HitSource = "full_text" | "semantic" | "hybrid";
 
+export type Provider =
+  | "icloud"
+  | "google_drive"
+  | "dropbox"
+  | "one_drive"
+  | "box"
+  | "local";
+
 export interface VaultInfo {
   root: string;
   note_count: number;
+  provider: Provider;
+  /** e.g. "iCloud Drive", "This computer" */
+  provider_name: string;
+}
+
+/** A place a vault can live (detected cloud folder or local). */
+export interface SyncLocation {
+  provider: Provider;
+  label: string;
+  vault_path: string;
+  vault_exists: boolean;
+}
+
+/** Background semantic-indexer progress (event `embed-status`). */
+export interface EmbedStatus {
+  running: boolean;
+  done: number;
+  total: number;
+  error: string | null;
 }
 export interface NoteMeta {
   id: number;
@@ -62,13 +89,35 @@ export interface TagCount {
 }
 
 // ---- vault lifecycle -------------------------------------------------------
+export const detectSyncLocations = () =>
+  invoke<SyncLocation[]>("detect_sync_locations");
+export const createVault = (path: string) =>
+  invoke<VaultInfo>("create_vault", { path });
 export const openVault = (path: string) =>
   invoke<VaultInfo>("open_vault", { path });
 export const currentVault = () => invoke<VaultInfo | null>("current_vault");
 export const closeVault = () => invoke<void>("close_vault");
 export const getLastVault = () => invoke<string | null>("get_last_vault");
 export const reindex = () => invoke<IndexStats>("reindex");
-export const embedVault = () => invoke<number>("embed_vault");
+/** Rebuild all embeddings in the background (progress via `embed-status`). */
+export const embedVault = () => invoke<void>("embed_vault");
+export const addAgentDocs = () => invoke<void>("add_agent_docs");
+
+/** Ready-to-paste MCP setup for AI tools, pointing at this app + vault. */
+export interface AgentSetup {
+  claude_code: string;
+  codex: string;
+}
+export const agentSetup = () => invoke<AgentSetup>("agent_setup");
+
+// ---- folders (notebooks) ---------------------------------------------------
+export const listFolders = () => invoke<string[]>("list_folders");
+export const createFolder = (rel_path: string) =>
+  invoke<void>("create_folder", { rel_path });
+export const renameFolder = (from: string, to: string) =>
+  invoke<void>("rename_folder", { from, to });
+export const deleteFolder = (rel_path: string) =>
+  invoke<void>("delete_folder", { rel_path });
 
 // ---- notes -----------------------------------------------------------------
 export const listNotes = () => invoke<NoteMeta[]>("list_notes");

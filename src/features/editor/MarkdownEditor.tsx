@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { EditorState, type Extension } from "@codemirror/state";
+import { Annotation, EditorState, type Extension } from "@codemirror/state";
 import { EditorView, drawSelection, keymap } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
@@ -24,6 +24,9 @@ interface Props {
   /** Extra extensions (live preview, wikilinks, attachments). Read once on mount. */
   extensions?: Extension[];
 }
+
+/** Marks a transaction that loads text from disk, which isn't a user edit. */
+const fromDisk = Annotation.define<boolean>();
 
 /** A thin React host around a CodeMirror 6 markdown editor. */
 export function MarkdownEditor({ doc, onChange, extensions = [] }: Props) {
@@ -58,7 +61,9 @@ export function MarkdownEditor({ doc, onChange, extensions = [] }: Props) {
         }),
         keymap.of([...defaultKeymap, ...historyKeymap]),
         EditorView.updateListener.of((u) => {
-          if (u.docChanged) onChangeRef.current(u.state.doc.toString());
+          if (u.docChanged && !u.transactions.some((t) => t.annotation(fromDisk))) {
+            onChangeRef.current(u.state.doc.toString());
+          }
         }),
         ...extensions,
       ],
@@ -87,6 +92,7 @@ export function MarkdownEditor({ doc, onChange, extensions = [] }: Props) {
           anchor: Math.min(sel.anchor, doc.length),
           head: Math.min(sel.head, doc.length),
         },
+        annotations: fromDisk.of(true),
       });
     }
   }, [doc]);

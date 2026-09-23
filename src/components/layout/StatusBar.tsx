@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
-import { FolderOpen } from "lucide-react";
+import { Loader2 } from "lucide-react";
 
 import { coreVersion } from "@/lib/ipc";
 import { useVault } from "@/features/vault/vault-store";
+import { ProviderIcon } from "@/features/vault/ProviderIcon";
 
-/** Slim bottom status bar: vault status + core version. */
+/** Slim bottom status bar: where notes sync, note count, indexing progress. */
 export function StatusBar() {
   const [version, setVersion] = useState("…");
-  const { vault, embedding } = useVault();
+  const { vault, notes, embedStatus } = useVault();
 
   useEffect(() => {
     coreVersion()
@@ -15,16 +16,29 @@ export function StatusBar() {
       .catch(() => setVersion("?"));
   }, []);
 
+  const syncLabel =
+    vault && vault.provider !== "local"
+      ? `Syncing via ${vault.provider_name}`
+      : "Stored on this computer";
+
   return (
     <footer className="flex h-6 shrink-0 items-center gap-3 border-t bg-sidebar px-3 text-[11px] text-muted-foreground">
-      <span className="flex min-w-0 items-center gap-1">
-        <FolderOpen className="size-3 shrink-0" aria-hidden />
-        <span className="truncate">
-          {vault ? `${vault.note_count} notes` : "No vault open"}
+      {vault && (
+        <span className="flex min-w-0 items-center gap-1" title={vault.root}>
+          <ProviderIcon provider={vault.provider} className="size-3 shrink-0" aria-hidden />
+          <span className="truncate">{syncLabel}</span>
         </span>
-      </span>
-      {embedding && <span className="text-primary">building semantic index…</span>}
-      <span className="ml-auto tabular-nums">core v{version}</span>
+      )}
+      {vault && <span className="tabular-nums">{notes.length} notes</span>}
+      {embedStatus?.running && embedStatus.total > 0 && (
+        <span className="flex items-center gap-1 text-primary" role="status">
+          <Loader2 className="size-3 animate-spin" aria-hidden />
+          <span className="tabular-nums">
+            Indexing for semantic search {embedStatus.done}/{embedStatus.total}
+          </span>
+        </span>
+      )}
+      <span className="ml-auto tabular-nums">v{version}</span>
     </footer>
   );
 }

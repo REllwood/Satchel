@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 
@@ -7,6 +7,7 @@ import { isTauri } from "@/lib/ipc";
 import { useVault } from "@/features/vault/vault-store";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { wikilinkExtension } from "./wikilink";
+import { registerFlush } from "./pending-save";
 
 type SaveState = "idle" | "saving" | "saved";
 
@@ -36,8 +37,47 @@ export function Editor() {
   contentRef.current = content;
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
+  // The unsaved edit, tied to the note it belongs to, and its debounce timer.
+  const pending = useRef<{ path: string; body: string } | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /** Write the pending edit now (to the note it was typed in). */
+  const flush = useCallback(async () => {
+    if (timer.current) {
+      clearTimeout(timer.current);
+      timer.current = null;
+    }
+    const edit = pending.current;
+    if (!edit) return;
+    pending.current = null;
+    try {
+      await api.writeNote(edit.path, edit.body);
+      if (activePath.current === edit.path && !pending.current) {
+        setSave("saved");
+        setDirty(false);
+      }
+    } catch (e) {
+      toast.error(`Save failed: ${e}`);
+      pending.current ??= edit; // keep it for the next attempt
+      if (activePath.current === edit.path) setSave("idle");
+    }
+  }, []);
+
+  const onEdit = useCallback(
+    (path: string, body: string) => {
+      setContent(body);
+      setDirty(true);
+      setSave("saving");
+      pending.current = { path, body };
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = setTimeout(() => void flush(), 600);
+    },
+    [flush],
+  );
 
   useEffect(() => {
+    // Save what was typed in the previous note before loading the next one.
+    void flush();
     activePath.current = selected;
     if (!selected) {
       setContent("");
@@ -59,28 +99,23 @@ export function Editor() {
     return () => {
       cancelled = true;
     };
-  }, [selected]);
+  }, [selected, flush]);
 
+  // Don't lose the last keystrokes when the app is hidden or closed.
   useEffect(() => {
-    if (!dirty || !selected) return;
-    const path = selected;
-    const body = content;
-    setSave("saving");
-    const timer = setTimeout(async () => {
-      try {
-        await api.writeNote(path, body);
-        // Only mark clean if no newer edits arrived while the write was in flight.
-        if (activePath.current === path && body === contentRef.current) {
-          setSave("saved");
-          setDirty(false);
-        }
-      } catch (e) {
-        toast.error(`Save failed: ${e}`);
-        setSave("idle");
-      }
-    }, 600);
-    return () => clearTimeout(timer);
-  }, [content, dirty, selected]);
+    registerFlush(flush);
+    const onHide = () => void flush();
+    window.addEventListener("blur", onHide);
+    window.addEventListener("beforeunload", onHide);
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      window.removeEventListener("blur", onHide);
+      window.removeEventListener("beforeunload", onHide);
+      document.removeEventListener("visibilitychange", onHide);
+      registerFlush(null);
+      void flush();
+    };
+  }, [flush]);
 
   // Reconcile external changes to the open note (never clobber unsaved edits).
   useEffect(() => {
@@ -142,10 +177,7 @@ export function Editor() {
             key={selected}
             doc={content}
             extensions={editorExtensions}
-            onChange={(v) => {
-              setContent(v);
-              setDirty(true);
-            }}
+            onChange={(v) => onEdit(selected, v)}
           />
         )}
       </div>

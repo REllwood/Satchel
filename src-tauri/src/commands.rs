@@ -2,14 +2,16 @@
 //! mapped to strings at this boundary. The frontend only ever talks to these.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::Ordering;
 
 use mynote_core::canvas::{self, Canvas};
-use mynote_core::embed::{default_model_dir, Embedder};
+use mynote_core::cloud::{self, Provider, SyncLocation};
+use mynote_core::embed::Embedder;
 use mynote_core::index::{self, IndexStats};
 use mynote_core::query::{self, QueryResult};
 use mynote_core::search::{self, semantic, SearchHit};
-use mynote_core::{db, rusqlite, vault, watch};
+use mynote_core::{agents, db, paths, rusqlite, vault, watch};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -19,10 +21,27 @@ fn es<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
+/// Move a file or folder to the system Trash. On macOS this goes through
+/// NSFileManager rather than scripting Finder, so there's no Automation prompt.
+fn move_to_trash(path: &Path) -> Result<(), String> {
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut ctx = trash::TrashContext::default();
+    #[cfg(target_os = "macos")]
+    {
+        use trash::macos::{DeleteMethod, TrashContextExtMacos};
+        ctx.set_delete_method(DeleteMethod::NsFileManager);
+    }
+    ctx.delete(path).map_err(|e| format!("Couldn't move to Trash: {e}"))
+}
+
 #[derive(Serialize)]
 pub struct VaultInfo {
     pub root: String,
     pub note_count: i64,
+    /// Which service syncs the vault folder (or `local`).
+    pub provider: Provider,
+    /// Human name for `provider`, e.g. "iCloud Drive".
+    pub provider_name: String,
 }
 
 #[derive(Serialize)]
@@ -68,6 +87,15 @@ pub struct TagCount {
     pub count: i64,
 }
 
+/// Progress of the background semantic indexer (event `embed-status`).
+#[derive(Clone, Serialize)]
+pub struct EmbedStatus {
+    pub running: bool,
+    pub done: usize,
+    pub total: usize,
+    pub error: Option<String>,
+}
+
 // ---- helpers ---------------------------------------------------------------
 
 fn with_vault<T>(
@@ -79,19 +107,46 @@ fn with_vault<T>(
     f(vault)
 }
 
-/// Ensure the embedder is loaded (model load is lazy). After this returns Ok,
-/// `vault.embedder` is `Some`. Returns `()` so the caller can take disjoint
-/// immutable borrows of `vault.conn` and `vault.embedder`.
-fn ensure_embedder(vault: &mut Vault) -> Result<(), String> {
+/// Load the embedder (if needed) and make sure the vector table exists, so
+/// semantic search works — returning partial results while indexing runs.
+fn ensure_semantic_ready(vault: &mut Vault, model_dir: &Path) -> Result<(), String> {
     if vault.embedder.is_none() {
-        vault.embedder = Some(Embedder::from_dir(&default_model_dir()).map_err(es)?);
+        vault.embedder = Some(Embedder::from_dir(model_dir).map_err(es)?);
     }
-    Ok(())
+    let dim = vault.embedder.as_ref().map(|e| e.dim()).unwrap_or(0) as u32;
+    semantic::ensure_semantic(&vault.conn, dim).map_err(es)
+}
+
+/// Reject paths that resolve to the vault root itself ("", ".", "/"), so
+/// folder and delete operations can never act on the whole vault.
+fn require_subpath(rel: &str) -> Result<(), String> {
+    let has_part = Path::new(rel.trim_matches('/'))
+        .components()
+        .any(|c| matches!(c, Component::Normal(_)));
+    if has_part {
+        Ok(())
+    } else {
+        Err("refusing to operate on the vault root".into())
+    }
+}
+
+fn is_case_only_rename(from: &str, to: &str) -> bool {
+    from != to && from.to_lowercase() == to.to_lowercase()
 }
 
 fn note_count(conn: &rusqlite::Connection) -> Result<i64, String> {
     conn.query_row("SELECT count(*) FROM notes", [], |r| r.get(0))
         .map_err(es)
+}
+
+fn vault_info(root: &Path, conn: &rusqlite::Connection) -> Result<VaultInfo, String> {
+    let provider = cloud::provider_for_path(root);
+    Ok(VaultInfo {
+        root: root.to_string_lossy().into_owned(),
+        note_count: note_count(conn)?,
+        provider,
+        provider_name: provider.display_name().to_string(),
+    })
 }
 
 fn last_vault_file(app: &AppHandle) -> Option<PathBuf> {
@@ -101,94 +156,135 @@ fn last_vault_file(app: &AppHandle) -> Option<PathBuf> {
         .map(|d| d.join("last_vault.txt"))
 }
 
-// ---- vault lifecycle -------------------------------------------------------
-
-#[tauri::command]
-pub fn open_vault(
-    app: AppHandle,
-    state: State<AppState>,
-    path: String,
-) -> Result<VaultInfo, String> {
-    let root = PathBuf::from(&path);
-    if !root.is_dir() {
-        return Err(format!("not a directory: {path}"));
+fn remember_last_vault(app: &AppHandle, root: &Path) {
+    if let Some(file) = last_vault_file(app) {
+        if let Some(parent) = file.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(file, root.to_string_lossy().as_bytes());
     }
-    let db_path = root.join(".mynote/index.db");
-    let conn = db::open(&db_path).map_err(es)?;
-    index::reindex_all(&conn, &root).map_err(es)?;
-    // Drop agent-convention docs (AGENTS.md/CLAUDE.md) if absent; best-effort.
-    let _ = mynote_core::agents::ensure_agent_docs(&root);
-    let query_conn = query::open_query_connection(&db_path).map_err(es)?;
-    let count = note_count(&conn)?;
+}
 
-    // Watch for external edits (AI tools, other editors, cloud sync): reconcile
-    // the index and notify the frontend. Own-writes are idempotent re-indexes.
-    let watcher = {
-        let app = app.clone();
-        watch::start(&root, move |events| {
-            if let Some(state) = app.try_state::<AppState>() {
-                if let Ok(mut guard) = state.vault.lock() {
-                    if let Some(v) = guard.as_mut() {
-                        for ev in &events {
-                            let _ = index::index_single(&v.conn, &v.root, &ev.rel_path);
-                            if !ev.removed && v.embedder.is_some() {
-                                if let Ok(Some(id)) =
-                                    index::note_id_by_path(&v.conn, &ev.rel_path)
-                                {
-                                    let emb = v.embedder.as_ref().unwrap();
-                                    let _ =
-                                        semantic::index_note_embeddings(&v.conn, emb, id);
-                                }
+/// Watch for external edits (AI tools, other editors, cloud sync): reconcile
+/// the index and notify the frontend. Own-writes are idempotent re-indexes.
+fn start_watcher(app: &AppHandle, root: &Path) -> Option<watch::WatchGuard> {
+    let app = app.clone();
+    watch::start(root, move |events| {
+        if let Some(state) = app.try_state::<AppState>() {
+            if let Ok(mut guard) = state.vault.lock() {
+                if let Some(v) = guard.as_mut() {
+                    for ev in &events {
+                        let _ = index::index_single(&v.conn, &v.root, &ev.rel_path);
+                        if let (false, Some(emb)) = (ev.removed, v.embedder.as_ref()) {
+                            if let Ok(Some(id)) = index::note_id_by_path(&v.conn, &ev.rel_path) {
+                                let _ = semantic::index_note_embeddings(&v.conn, emb, id);
                             }
                         }
                     }
                 }
             }
-            let _ = app.emit("vault-changed", events);
-        })
-        .ok()
-    };
+        }
+        let _ = app.emit("vault-changed", events);
+    })
+    .ok()
+}
+
+fn open_vault_at(
+    app: &AppHandle,
+    state: &State<AppState>,
+    root: PathBuf,
+) -> Result<VaultInfo, String> {
+    if !root.is_dir() {
+        return Err(format!("not a folder: {}", root.display()));
+    }
+    // The index is per-machine, outside the (usually cloud-synced) vault.
+    let db_path = paths::index_db_path(&root);
+    let conn = db::open(&db_path).map_err(es)?;
+    index::reindex_all(&conn, &root).map_err(es)?;
+    let query_conn = query::open_query_connection(&db_path).map_err(es)?;
+    let info = vault_info(&root, &conn)?;
+    let watch = start_watcher(app, &root);
 
     *state.vault.lock().map_err(|_| "state poisoned")? = Some(Vault {
         root: root.clone(),
         conn,
         query_conn,
         embedder: None,
-        watch: watcher,
+        watch,
     });
-
-    if let Some(file) = last_vault_file(&app) {
-        if let Some(parent) = file.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::write(file, &path);
-    }
-
-    Ok(VaultInfo {
-        root: path,
-        note_count: count,
-    })
+    remember_last_vault(app, &root);
+    spawn_semantic_indexer(app.clone());
+    Ok(info)
 }
 
-#[tauri::command]
+fn welcome_note(provider: Provider) -> String {
+    let sync = match provider {
+        Provider::Local => "They're stored only on this computer.".to_string(),
+        p => format!(
+            "{} keeps them in sync across your devices — MyNote itself never uploads anything.",
+            p.display_name()
+        ),
+    };
+    format!(
+        "# Welcome to MyNote\n\n\
+         Your notes are plain Markdown files in this folder. {sync}\n\n\
+         - Create a note with **+**, or a folder (notebook) with the folder button next to it.\n\
+         - Link notes with `[[double brackets]]`.\n\
+         - Paste or drop images straight into a note.\n\
+         - Press **⌘K** (Ctrl+K) to search by words or by meaning, and **⌘⇧P** (Ctrl+Shift+P) for every command.\n\n\
+         Delete this note whenever you like.\n"
+    )
+}
+
+// ---- vault lifecycle -------------------------------------------------------
+
+/// Cloud-synced folders (iCloud Drive, Google Drive, …) plus a local option.
+#[tauri::command(async)]
+pub fn detect_sync_locations() -> Vec<SyncLocation> {
+    cloud::detect_locations()
+}
+
+/// Create (if needed) and open a vault folder, adding a welcome note to a new one.
+#[tauri::command(async)]
+pub fn create_vault(
+    app: AppHandle,
+    state: State<AppState>,
+    path: String,
+) -> Result<VaultInfo, String> {
+    let root = PathBuf::from(&path);
+    fs::create_dir_all(&root).map_err(|e| format!("Couldn't create {path}: {e}"))?;
+    if vault::scan_vault(&root).is_empty() {
+        let welcome = welcome_note(cloud::provider_for_path(&root));
+        vault::write_note_atomic(&root.join("Welcome to MyNote.md"), &welcome).map_err(es)?;
+    }
+    open_vault_at(&app, &state, root)
+}
+
+#[tauri::command(async)]
+pub fn open_vault(
+    app: AppHandle,
+    state: State<AppState>,
+    path: String,
+) -> Result<VaultInfo, String> {
+    open_vault_at(&app, &state, PathBuf::from(path))
+}
+
+#[tauri::command(async)]
 pub fn current_vault(state: State<AppState>) -> Result<Option<VaultInfo>, String> {
     let guard = state.vault.lock().map_err(|_| "state poisoned")?;
     match guard.as_ref() {
-        Some(v) => Ok(Some(VaultInfo {
-            root: v.root.to_string_lossy().into_owned(),
-            note_count: note_count(&v.conn)?,
-        })),
+        Some(v) => Ok(Some(vault_info(&v.root, &v.conn)?)),
         None => Ok(None),
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn close_vault(state: State<AppState>) -> Result<(), String> {
     *state.vault.lock().map_err(|_| "state poisoned")? = None;
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_last_vault(app: AppHandle) -> Option<String> {
     last_vault_file(&app)
         .and_then(|f| fs::read_to_string(f).ok())
@@ -196,7 +292,7 @@ pub fn get_last_vault(app: AppHandle) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reindex(state: State<AppState>) -> Result<IndexStats, String> {
     with_vault(&state, |v| {
         let root = v.root.clone();
@@ -204,18 +300,136 @@ pub fn reindex(state: State<AppState>) -> Result<IndexStats, String> {
     })
 }
 
-#[tauri::command]
-pub fn embed_vault(state: State<AppState>) -> Result<usize, String> {
+// ---- semantic indexing -----------------------------------------------------
+
+/// Start the background semantic indexer (no-op if already running). It
+/// embeds one note at a time, releasing the vault lock between notes, so the
+/// UI stays responsive on large vaults. Progress is emitted as `embed-status`.
+pub fn spawn_semantic_indexer(app: AppHandle) {
+    if app.state::<AppState>().embedding.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let result = run_semantic_indexer(&app);
+        app.state::<AppState>().embedding.store(false, Ordering::SeqCst);
+        let status = match result {
+            Ok((done, total)) => EmbedStatus { running: false, done, total, error: None },
+            Err(e) => EmbedStatus { running: false, done: 0, total: 0, error: Some(e) },
+        };
+        let _ = app.emit("embed-status", status);
+    });
+}
+
+fn run_semantic_indexer(app: &AppHandle) -> Result<(usize, usize), String> {
+    let state = app.state::<AppState>();
+    let (root, needs_model) = {
+        let guard = state.vault.lock().map_err(|_| "state poisoned")?;
+        let v = guard.as_ref().ok_or("no vault is open")?;
+        (v.root.clone(), v.embedder.is_none())
+    };
+    if needs_model {
+        // Load the model without holding the lock.
+        let embedder = Embedder::from_dir(&state.model_dir).map_err(es)?;
+        let mut guard = state.vault.lock().map_err(|_| "state poisoned")?;
+        if let Some(v) = guard.as_mut().filter(|v| v.root == root) {
+            if v.embedder.is_none() {
+                v.embedder = Some(embedder);
+            }
+        }
+    }
+    let pending = {
+        let mut guard = state.vault.lock().map_err(|_| "state poisoned")?;
+        let Some(v) = guard.as_mut().filter(|v| v.root == root) else {
+            return Ok((0, 0));
+        };
+        ensure_semantic_ready(v, &state.model_dir)?;
+        semantic::pending_notes(&v.conn).map_err(es)?
+    };
+    let total = pending.len();
+    let _ = app.emit(
+        "embed-status",
+        EmbedStatus { running: true, done: 0, total, error: None },
+    );
+    for (i, id) in pending.into_iter().enumerate() {
+        {
+            let guard = state.vault.lock().map_err(|_| "state poisoned")?;
+            let Some(v) = guard.as_ref().filter(|v| v.root == root) else {
+                return Ok((i, total)); // vault switched or closed
+            };
+            if let Some(embedder) = v.embedder.as_ref() {
+                let _ = semantic::index_note_embeddings(&v.conn, embedder, id);
+            }
+        }
+        let done = i + 1;
+        if done % 10 == 0 || done == total {
+            let _ = app.emit(
+                "embed-status",
+                EmbedStatus { running: true, done, total, error: None },
+            );
+        }
+    }
+    Ok((total, total))
+}
+
+/// Rebuild all embeddings from scratch (in the background).
+#[tauri::command(async)]
+pub fn embed_vault(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    if state.embedding.load(Ordering::SeqCst) {
+        return Err("Semantic indexing is already running".into());
+    }
     with_vault(&state, |v| {
-        ensure_embedder(v)?;
-        let embedder = v.embedder.as_ref().unwrap();
-        semantic::embed_all(&v.conn, embedder).map_err(es)
+        let _ = v.conn.execute("DELETE FROM vec_chunks", []); // may not exist yet
+        v.conn.execute("DELETE FROM chunks", []).map_err(es)?;
+        Ok(())
+    })?;
+    spawn_semantic_indexer(app);
+    Ok(())
+}
+
+/// Opt-in: add AGENTS.md / CLAUDE.md so AI coding tools understand the vault.
+#[tauri::command(async)]
+pub fn add_agent_docs(state: State<AppState>) -> Result<(), String> {
+    with_vault(&state, |v| {
+        agents::ensure_agent_docs(&v.root).map_err(es)?;
+        for doc in ["AGENTS.md", "CLAUDE.md"] {
+            index::index_single(&v.conn, &v.root, doc).map_err(es)?;
+        }
+        Ok(())
+    })
+}
+
+/// Ready-to-paste MCP setup for AI tools. The installed app doubles as the MCP
+/// server (`<app> mcp --vault <folder>`), so no separate CLI is needed.
+#[derive(Serialize)]
+pub struct AgentSetup {
+    pub claude_code: String,
+    pub codex: String,
+}
+
+#[tauri::command(async)]
+pub fn agent_setup(state: State<AppState>) -> Result<AgentSetup, String> {
+    let root = with_vault(&state, |v| Ok(v.root.clone()))?;
+    let exe = std::env::current_exe().map_err(es)?;
+    let (exe, root) = (exe.to_string_lossy(), root.to_string_lossy());
+    // JSON string literals are valid TOML basic strings (escapes included).
+    let q = |s: &str| serde_json::to_string(s).unwrap_or_default();
+    Ok(AgentSetup {
+        claude_code: format!(
+            "claude mcp add --transport stdio mynote -- {} mcp --vault {}",
+            q(&exe),
+            q(&root)
+        ),
+        codex: format!(
+            "[mcp_servers.mynote]\ncommand = {}\nargs = [\"mcp\", \"--vault\", {}]\n",
+            q(&exe),
+            q(&root)
+        ),
     })
 }
 
 // ---- notes -----------------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_notes(state: State<AppState>) -> Result<Vec<NoteMeta>, String> {
     with_vault(&state, |v| {
         let mut stmt = v
@@ -236,29 +450,38 @@ pub fn list_notes(state: State<AppState>) -> Result<Vec<NoteMeta>, String> {
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_note(state: State<AppState>, rel_path: String) -> Result<NoteContent, String> {
-    with_vault(&state, |v| {
-        let abs = vault::safe_join(&v.root, &rel_path).map_err(es)?;
-        let content = vault::read_note(&abs).map_err(es)?;
-        Ok(NoteContent { rel_path, content })
-    })
+    let root = with_vault(&state, |v| Ok(v.root.clone()))?;
+    let abs = vault::safe_join(&root, &rel_path).map_err(es)?;
+    // A cloud-only note is downloaded by the OS when read; do that without
+    // holding the vault lock, then index it now that its content is local.
+    let was_cloud_only = fs::metadata(&abs)
+        .map(|m| vault::is_dataless(&m))
+        .unwrap_or(false);
+    let content = vault::read_note(&abs).map_err(es)?;
+    if was_cloud_only {
+        with_vault(&state, |v| {
+            if v.root == root {
+                index::index_single(&v.conn, &v.root, &rel_path).map_err(es)?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(NoteContent { rel_path, content })
 }
 
 fn reindex_one(v: &mut Vault, rel_path: &str) -> Result<(), String> {
     let root = v.root.clone();
     let id = index::index_single(&v.conn, &root, rel_path).map_err(es)?;
     // Keep embeddings current if they've been built this session.
-    if v.embedder.is_some() {
-        if let Some(id) = id {
-            let embedder = v.embedder.as_ref().unwrap();
-            semantic::index_note_embeddings(&v.conn, embedder, id).map_err(es)?;
-        }
+    if let (Some(embedder), Some(id)) = (v.embedder.as_ref(), id) {
+        semantic::index_note_embeddings(&v.conn, embedder, id).map_err(es)?;
     }
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn write_note(state: State<AppState>, rel_path: String, content: String) -> Result<(), String> {
     with_vault(&state, |v| {
         let abs = vault::safe_join(&v.root, &rel_path).map_err(es)?;
@@ -267,7 +490,7 @@ pub fn write_note(state: State<AppState>, rel_path: String, content: String) -> 
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_note(
     state: State<AppState>,
     rel_path: String,
@@ -300,13 +523,19 @@ pub fn create_note(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn rename_note(state: State<AppState>, from: String, to: String) -> Result<(), String> {
+    require_subpath(&from)?;
+    require_subpath(&to)?;
     with_vault(&state, |v| {
         let abs_from = vault::safe_join(&v.root, &from).map_err(es)?;
         let abs_to = vault::safe_join(&v.root, &to).map_err(es)?;
-        if abs_to.exists() {
-            return Err(format!("target already exists: {to}"));
+        if !abs_from.is_file() {
+            return Err(format!("\"{from}\" is not a note"));
+        }
+        // A case-only rename finds "itself" on case-insensitive disks.
+        if abs_to.exists() && !is_case_only_rename(&from, &to) {
+            return Err(format!("\"{to}\" already exists"));
         }
         if let Some(parent) = abs_to.parent() {
             fs::create_dir_all(parent).map_err(es)?;
@@ -317,20 +546,94 @@ pub fn rename_note(state: State<AppState>, from: String, to: String) -> Result<(
     })
 }
 
-#[tauri::command]
+/// Move a note to the system Trash (recoverable), then drop it from the index.
+#[tauri::command(async)]
 pub fn delete_note(state: State<AppState>, rel_path: String) -> Result<(), String> {
+    require_subpath(&rel_path)?;
     with_vault(&state, |v| {
         let abs = vault::safe_join(&v.root, &rel_path).map_err(es)?;
-        if abs.exists() {
-            fs::remove_file(&abs).map_err(es)?;
+        if abs.is_dir() {
+            return Err("not a note".into());
+        }
+        if abs.is_file() {
+            move_to_trash(&abs)?;
         }
         reindex_one(v, &rel_path)
     })
 }
 
+// ---- folders (notebooks) ---------------------------------------------------
+
+#[tauri::command(async)]
+pub fn list_folders(state: State<AppState>) -> Result<Vec<String>, String> {
+    with_vault(&state, |v| Ok(vault::list_dirs(&v.root)))
+}
+
+#[tauri::command(async)]
+pub fn create_folder(state: State<AppState>, rel_path: String) -> Result<(), String> {
+    require_subpath(&rel_path)?;
+    with_vault(&state, |v| {
+        let abs = vault::safe_join(&v.root, &rel_path).map_err(es)?;
+        if abs.exists() {
+            return Err(format!("\"{rel_path}\" already exists"));
+        }
+        fs::create_dir_all(&abs).map_err(es)
+    })
+}
+
+/// Rename or move a folder; its notes are re-indexed under their new paths.
+#[tauri::command(async)]
+pub fn rename_folder(
+    app: AppHandle,
+    state: State<AppState>,
+    from: String,
+    to: String,
+) -> Result<(), String> {
+    require_subpath(&from)?;
+    require_subpath(&to)?;
+    with_vault(&state, |v| {
+        let abs_from = vault::safe_join(&v.root, &from).map_err(es)?;
+        let abs_to = vault::safe_join(&v.root, &to).map_err(es)?;
+        if !abs_from.is_dir() {
+            return Err(format!("\"{from}\" is not a folder"));
+        }
+        if abs_to.exists() && !is_case_only_rename(&from, &to) {
+            return Err(format!("\"{to}\" already exists"));
+        }
+        if abs_to.starts_with(&abs_from) {
+            return Err("can't move a folder into itself".into());
+        }
+        if let Some(parent) = abs_to.parent() {
+            fs::create_dir_all(parent).map_err(es)?;
+        }
+        fs::rename(&abs_from, &abs_to).map_err(es)?;
+        let root = v.root.clone();
+        index::reindex_all(&v.conn, &root).map_err(es)?;
+        Ok(())
+    })?;
+    spawn_semantic_indexer(app); // moved notes get fresh embeddings
+    Ok(())
+}
+
+/// Move a folder (and everything in it) to the system Trash.
+#[tauri::command(async)]
+pub fn delete_folder(state: State<AppState>, rel_path: String) -> Result<(), String> {
+    require_subpath(&rel_path)?;
+    with_vault(&state, |v| {
+        let abs = vault::safe_join(&v.root, &rel_path).map_err(es)?;
+        if !abs.is_dir() {
+            return Err(format!("\"{rel_path}\" is not a folder"));
+        }
+        move_to_trash(&abs)?;
+        let root = v.root.clone();
+        index::reindex_all(&v.conn, &root).map_err(es)?;
+        Ok(())
+    })
+}
+
 // ---- attachments -----------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_attachment(
     state: State<AppState>,
     bytes: Vec<u8>,
@@ -353,7 +656,7 @@ pub fn save_attachment(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_attachment(state: State<AppState>, rel_path: String) -> Result<Vec<u8>, String> {
     with_vault(&state, |v| {
         let abs = vault::safe_join(&v.root, &rel_path).map_err(es)?;
@@ -363,12 +666,12 @@ pub fn read_attachment(state: State<AppState>, rel_path: String) -> Result<Vec<u
 
 // ---- canvas (JSONCanvas) ---------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_canvases(state: State<AppState>) -> Result<Vec<String>, String> {
     with_vault(&state, |v| Ok(vault::list_by_ext(&v.root, "canvas")))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_canvas(state: State<AppState>, rel_path: String) -> Result<Canvas, String> {
     with_vault(&state, |v| {
         let abs = vault::safe_join(&v.root, &rel_path).map_err(es)?;
@@ -381,7 +684,7 @@ pub fn read_canvas(state: State<AppState>, rel_path: String) -> Result<Canvas, S
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn write_canvas(
     state: State<AppState>,
     rel_path: String,
@@ -394,7 +697,7 @@ pub fn write_canvas(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_canvas(state: State<AppState>, rel_path: String) -> Result<String, String> {
     with_vault(&state, |v| {
         let mut base = rel_path;
@@ -417,7 +720,7 @@ pub fn create_canvas(state: State<AppState>, rel_path: String) -> Result<String,
 
 // ---- search & query --------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn search_fulltext(
     state: State<AppState>,
     query: String,
@@ -428,33 +731,35 @@ pub fn search_fulltext(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn search_semantic(
     state: State<AppState>,
     query: String,
     limit: usize,
 ) -> Result<Vec<SearchHit>, String> {
+    let model_dir = state.model_dir.clone();
     with_vault(&state, |v| {
-        ensure_embedder(v)?;
+        ensure_semantic_ready(v, &model_dir)?;
         let embedder = v.embedder.as_ref().unwrap();
         semantic::search_semantic(&v.conn, embedder, &query, limit).map_err(es)
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn search_hybrid(
     state: State<AppState>,
     query: String,
     limit: usize,
 ) -> Result<Vec<SearchHit>, String> {
+    let model_dir = state.model_dir.clone();
     with_vault(&state, |v| {
-        ensure_embedder(v)?;
+        ensure_semantic_ready(v, &model_dir)?;
         let embedder = v.embedder.as_ref().unwrap();
         semantic::search_hybrid(&v.conn, embedder, &query, limit).map_err(es)
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn run_query(
     state: State<AppState>,
     sql: String,
@@ -467,7 +772,7 @@ pub fn run_query(
 
 // ---- links, graph, tags ----------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_backlinks(state: State<AppState>, rel_path: String) -> Result<Vec<Backlink>, String> {
     with_vault(&state, |v| {
         let Some(note_id) = index::note_id_by_path(&v.conn, &rel_path).map_err(es)? else {
@@ -518,7 +823,7 @@ pub fn get_backlinks(state: State<AppState>, rel_path: String) -> Result<Vec<Bac
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_graph(state: State<AppState>) -> Result<GraphData, String> {
     with_vault(&state, |v| {
         let nodes = {
@@ -559,7 +864,7 @@ pub fn get_graph(state: State<AppState>) -> Result<GraphData, String> {
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_tags(state: State<AppState>) -> Result<Vec<TagCount>, String> {
     with_vault(&state, |v| {
         let mut stmt = v
@@ -578,7 +883,7 @@ pub fn get_tags(state: State<AppState>) -> Result<Vec<TagCount>, String> {
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn notes_for_tag(state: State<AppState>, tag: String) -> Result<Vec<String>, String> {
     with_vault(&state, |v| {
         let mut stmt = v

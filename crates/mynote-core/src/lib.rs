@@ -14,11 +14,14 @@ pub use rusqlite;
 
 pub mod agents;
 pub mod canvas;
+pub mod cloud;
 pub mod db;
 pub mod embed;
 pub mod index;
+pub mod mcp;
 pub mod model;
 pub mod parse;
+pub mod paths;
 pub mod query;
 pub mod search;
 pub mod vault;

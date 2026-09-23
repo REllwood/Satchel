@@ -14,8 +14,8 @@ Everything here is just files — safe to read and edit directly.
 - `**/*.md` — notes. Optional YAML frontmatter at the top (`---` … `---`).
 - `attachments/` — images and other embedded files.
 - `*.canvas` — JSONCanvas boards (https://jsoncanvas.org).
-- `.mynote/` — **generated index** (SQLite) and settings. Do not edit by hand;
-  it is rebuilt from the files.
+- MyNote's search index lives outside this folder (per machine) and is rebuilt
+  from the files — the files here are the only source of truth.
 
 ## Conventions
 - **Title**: frontmatter `title:`, else the first `# H1`, else the filename.
@@ -25,11 +25,13 @@ Everything here is just files — safe to read and edit directly.
 - To **add a note**: create a `.md` file with a `# Title` and write Markdown. MyNote indexes it automatically.
 
 ## Driving MyNote from an agent
-MyNote ships an MCP server exposing search/query/read/create over this vault.
-- **Claude Code**: `claude mcp add --transport stdio mynote -- mynote mcp --vault "<this folder>"`
+The MyNote app is also an MCP server (search, semantic search, read-only SQL,
+read and create notes) — run it as `<MyNote app binary> mcp --vault "<this folder>"`.
+In MyNote, **Settings → AI tools** copies the exact command for this computer.
+- **Claude Code**: `claude mcp add --transport stdio mynote -- <MyNote app binary> mcp --vault "<this folder>"`
 - **Codex**: add to `~/.codex/config.toml`:
-  `[mcp_servers.mynote]` with `command = "mynote"`, `args = ["mcp", "--vault", "<this folder>"]`
-- Or use the CLI directly: `mynote search "<query>" --vault "<this folder>"`,
+  `[mcp_servers.mynote]` with `command = "<MyNote app binary>"`, `args = ["mcp", "--vault", "<this folder>"]`
+- The optional `mynote` CLI does the same from a shell: `mynote search "<query>" --vault "<this folder>"`,
   `mynote query "SELECT rel_path FROM notes" --vault "<this folder>"` (read-only SQL).
 "#;
 

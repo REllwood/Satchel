@@ -1,7 +1,5 @@
 //! `mynote` — headless CLI + MCP server over `mynote-core`.
 
-mod mcp;
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -65,8 +63,9 @@ fn resolve_vault(opt: Option<PathBuf>) -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
+/// The per-machine index (shared with the desktop app), outside the vault.
 fn db_path(root: &Path) -> PathBuf {
-    root.join(".mynote/index.db")
+    mynote_core::paths::index_db_path(root)
 }
 
 /// Open the index and bring it current (incremental reindex).
@@ -79,6 +78,7 @@ fn open_synced(root: &Path) -> Result<Connection> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let root = resolve_vault(cli.vault);
+    vault::allow_cloud_downloads();
 
     match cli.command {
         Command::Init => {
@@ -106,13 +106,7 @@ fn main() -> Result<()> {
             let hits = if sem {
                 let embedder = embed::Embedder::from_dir(&embed::default_model_dir())
                     .context("loading embedding model")?;
-                semantic::ensure_semantic(&conn, embedder.dim() as u32)?;
-                let n: i64 = conn
-                    .query_row("SELECT count(*) FROM vec_chunks", [], |r| r.get(0))
-                    .unwrap_or(0);
-                if n == 0 {
-                    semantic::embed_all(&conn, &embedder)?;
-                }
+                semantic::embed_pending(&conn, &embedder)?;
                 semantic::search_semantic(&conn, &embedder, &q, limit)?
             } else {
                 search::fts::search_fulltext(&conn, &q, limit)?
@@ -174,7 +168,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Mcp => {
-            mcp::run(&root)?;
+            mynote_core::mcp::run(&root)?;
         }
     }
     Ok(())

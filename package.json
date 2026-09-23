@@ -2,12 +2,18 @@
   "name": "mynote",
   "private": true,
   "version": "0.1.0",
+  "description": "Local-first notes that sync through your own iCloud Drive or Google Drive folder.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/REllwood/Satchel.git"
+  },
   "type": "module",
   "scripts": {
-    "dev": "bunx --bun vite",
-    "build": "tsc && bunx --bun vite build",
-    "preview": "bunx --bun vite preview",
-    "test": "bunx --bun vitest run",
+    "dev": "bun --bun vite",
+    "build": "tsc && bun --bun vite build",
+    "preview": "bun --bun vite preview",
+    "test": "bun --bun vitest run",
     "tauri": "tauri"
   },
   "dependencies": {

@@ -1,18 +1,21 @@
 //! Minimal MCP server over stdio. MCP is newline-delimited JSON-RPC 2.0, so we
-//! implement it directly (no async runtime / SDK) and expose note tools backed
-//! by `mynote-core`. Works with `claude mcp add --transport stdio mynote -- mynote mcp`.
+//! implement it directly (no async runtime / SDK) and expose note tools over a
+//! vault. Served by both the `mynote` CLI and the desktop app (`MyNote mcp`),
+//! e.g. `claude mcp add --transport stdio mynote -- <app> mcp --vault <folder>`.
 
 use std::io::{self, BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{bail, Result};
-use mynote_core::rusqlite::Connection;
-use mynote_core::search::semantic;
-use mynote_core::{db, embed, index, query, search, vault};
+use rusqlite::Connection;
 use serde_json::{json, Value};
 
+use crate::search::semantic;
+use crate::{db, embed, index, query, search, vault};
+
+/// Serve MCP on stdin/stdout until EOF.
 pub fn run(root: &Path) -> Result<()> {
-    let db_path = root.join(".mynote/index.db");
+    let db_path = crate::paths::index_db_path(root);
     let conn = db::open(&db_path)?;
     index::reindex_all(&conn, root)?;
     let mut embedder: Option<embed::Embedder> = None;
@@ -116,12 +119,17 @@ fn tool_specs() -> Value {
 
 fn call_tool(
     root: &Path,
-    db_path: &PathBuf,
+    db_path: &Path,
     conn: &Connection,
     embedder: &mut Option<embed::Embedder>,
     name: &str,
     args: &Value,
 ) -> Result<String> {
+    // The server is long-lived while notes change underneath it (the app,
+    // cloud sync, other agents); an incremental reindex is a cheap stat walk.
+    if matches!(name, "search_notes" | "semantic_search" | "list_notes" | "list_tags" | "run_query") {
+        index::reindex_all(conn, root)?;
+    }
     match name {
         "search_notes" => {
             let hits = search::fts::search_fulltext(conn, str_arg(args, "query")?, limit_arg(args))?;
@@ -132,13 +140,8 @@ fn call_tool(
                 *embedder = Some(embed::Embedder::from_dir(&embed::default_model_dir())?);
             }
             let emb = embedder.as_ref().unwrap();
-            semantic::ensure_semantic(conn, emb.dim() as u32)?;
-            let n: i64 = conn
-                .query_row("SELECT count(*) FROM vec_chunks", [], |r| r.get(0))
-                .unwrap_or(0);
-            if n == 0 {
-                semantic::embed_all(conn, emb)?;
-            }
+            // Embed notes added or edited since the last search.
+            semantic::embed_pending(conn, emb)?;
             let hits = semantic::search_semantic(conn, emb, str_arg(args, "query")?, limit_arg(args))?;
             Ok(serde_json::to_string_pretty(&hits)?)
         }

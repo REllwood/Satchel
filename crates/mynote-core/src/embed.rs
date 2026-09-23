@@ -84,16 +84,35 @@ impl Embedder {
     }
 }
 
-/// Resolve the bundled model directory. Honours `MYNOTE_MODEL_DIR`, else falls
-/// back to the crate's bundled assets (works in dev/tests). The app and CLI
-/// override this with their packaged resource path.
+/// Resolve the bundled model directory for the running binary.
+///
+/// Order: `MYNOTE_MODEL_DIR`; the model shipped alongside this executable
+/// (macOS `.app` Resources, next to the binary, Linux package lib dir); an
+/// installed `MyNote.app` (so the CLI can reuse the app's model); finally the
+/// source checkout (dev and tests). The desktop app passes Tauri's resolved
+/// resource path explicitly.
 pub fn default_model_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("MYNOTE_MODEL_DIR") {
+    if let Some(dir) = std::env::var_os("MYNOTE_MODEL_DIR") {
         return PathBuf::from(dir);
     }
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets/models")
-        .join(DEFAULT_MODEL)
+    let rel = Path::new("models").join(DEFAULT_MODEL);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    {
+        candidates.push(exe_dir.join("../Resources").join(&rel));
+        candidates.push(exe_dir.join(&rel));
+        candidates.push(exe_dir.join("../lib/MyNote").join(&rel));
+    }
+    #[cfg(target_os = "macos")]
+    candidates.push(Path::new("/Applications/MyNote.app/Contents/Resources").join(&rel));
+
+    let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets").join(&rel);
+    candidates
+        .into_iter()
+        .find(|dir| dir.join("model.onnx").is_file())
+        .unwrap_or(dev)
 }
 
 /// Split a note body into chunks (~1200 chars), breaking at heading boundaries

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Database,
-  FolderOpen,
+  FolderPlus,
   LayoutDashboard,
   Network,
   PanelLeft,
@@ -40,6 +40,7 @@ import {
   type PaletteCommand,
 } from "@/features/command/CommandPalette";
 import { useVault } from "@/features/vault/vault-store";
+import { Onboarding } from "@/features/vault/Onboarding";
 import { useTheme } from "@/components/theme-provider";
 
 function Pane({ title, children }: { title: string; children: ReactNode }) {
@@ -61,11 +62,16 @@ function baseName(path: string): string {
 }
 
 function NotesPanel() {
-  const { vault, loading, pickAndOpen, createNote } = useVault();
+  const { vault, createNote } = useVault();
+  // Folder that currently shows an inline "new folder" input ("" = top level).
+  const [newFolderIn, setNewFolderIn] = useState<string | null>(null);
   return (
     <div className="flex h-full flex-col bg-sidebar">
       <div className="flex h-8 shrink-0 items-center gap-0.5 px-2">
-        <span className="flex-1 truncate text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        <span
+          className="flex-1 truncate text-xs font-medium uppercase tracking-wide text-muted-foreground"
+          title={vault?.root}
+        >
           {vault ? baseName(vault.root) : "Notes"}
         </span>
         <Tooltip>
@@ -74,14 +80,13 @@ function NotesPanel() {
               size="icon"
               variant="ghost"
               className="size-6"
-              aria-label="New note"
-              disabled={!vault}
-              onClick={createNote}
+              aria-label="New folder"
+              onClick={() => setNewFolderIn("")}
             >
-              <Plus />
+              <FolderPlus />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>New note</TooltipContent>
+          <TooltipContent>New folder</TooltipContent>
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
@@ -89,31 +94,18 @@ function NotesPanel() {
               size="icon"
               variant="ghost"
               className="size-6"
-              aria-label="Open vault folder"
-              onClick={pickAndOpen}
+              aria-label="New note"
+              onClick={() => void createNote()}
             >
-              <FolderOpen />
+              <Plus />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Open vault</TooltipContent>
+          <TooltipContent>New note (⌘N)</TooltipContent>
         </Tooltip>
       </div>
-      {vault && <TagsBar />}
+      <TagsBar />
       <ScrollArea className="min-h-0 flex-1 px-1 pb-2">
-        {vault ? (
-          <FileTree />
-        ) : (
-          <div className="flex flex-col items-center gap-3 px-3 py-10 text-center">
-            <p className="text-sm text-muted-foreground">
-              Open a folder to use as your vault. Notes are plain Markdown files
-              you fully own.
-            </p>
-            <Button onClick={pickAndOpen} disabled={loading}>
-              <FolderOpen />
-              {loading ? "Opening…" : "Open vault"}
-            </Button>
-          </div>
-        )}
+        <FileTree newFolderIn={newFolderIn} onNewFolderIn={setNewFolderIn} />
       </ScrollArea>
     </div>
   );
@@ -129,18 +121,19 @@ export function AppShell() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
-  const { createNote, pickAndOpen, closeVault, buildEmbeddings } = useVault();
+  const { vault, booting, createNote, closeVault, buildEmbeddings, addAgentDocs } =
+    useVault();
   const { setTheme } = useTheme();
 
   const commands: PaletteCommand[] = [
-    { id: "new", label: "New note", run: createNote },
+    { id: "new", label: "New note", hint: "⌘N", run: () => void createNote() },
     { id: "search", label: "Search notes", hint: "⌘K", run: () => setSearchOpen(true) },
     { id: "graph", label: "Open graph view", run: () => setGraphOpen(true) },
     { id: "canvas", label: "Open canvas", run: () => setCanvasOpen(true) },
     { id: "query", label: "Open query view", run: () => setQueryOpen(true) },
-    { id: "vault", label: "Open / switch vault", run: pickAndOpen },
-    { id: "close", label: "Close vault", run: closeVault },
-    { id: "embed", label: "Build semantic index", run: buildEmbeddings },
+    { id: "vault", label: "Change notes location…", run: closeVault },
+    { id: "embed", label: "Rebuild semantic index", run: buildEmbeddings },
+    { id: "agents", label: "Add AGENTS.md / CLAUDE.md for AI tools", run: addAgentDocs },
     { id: "settings", label: "Open settings", run: () => setSettingsOpen(true) },
     { id: "theme-system", label: "Theme: System", run: () => setTheme("system") },
     { id: "theme-light", label: "Theme: Light", run: () => setTheme("light") },
@@ -166,11 +159,26 @@ export function AppShell() {
       } else if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
         e.preventDefault();
         toggle(leftRef);
+      } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        void createNote();
       }
     };
+    if (!vault) return;
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [vault, createNote]);
+
+  if (booting) return <div className="h-full bg-background" aria-busy="true" />;
+  if (!vault) {
+    return (
+      <div className="flex h-full flex-col">
+        <div className="min-h-0 flex-1">
+          <Onboarding />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full flex-col">

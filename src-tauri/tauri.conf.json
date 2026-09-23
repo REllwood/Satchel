@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "MyNote",
   "version": "0.1.0",
-  "identifier": "com.mynote.app",
+  "identifier": "io.github.rellwood.mynote",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
@@ -32,6 +32,19 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "category": "Productivity",
+    "shortDescription": "Local-first notes that sync through your own cloud folder",
+    "longDescription": "MyNote keeps your notes as plain Markdown files in a folder you choose — iCloud Drive, Google Drive, Dropbox, OneDrive or just this computer — with full-text and semantic search, backlinks, a graph, canvases and an MCP server for Claude Code and Codex. Everything runs locally.",
+    "copyright": "Copyright © 2026 the MyNote contributors",
+    "license": "MIT",
+    "homepage": "https://github.com/REllwood/Satchel",
+    "resources": {
+      "../crates/mynote-core/assets/models/all-MiniLM-L6-v2/": "models/all-MiniLM-L6-v2/"
+    },
+    "macOS": {
+      "minimumSystemVersion": "13.4",
+      "signingIdentity": "-"
+    }
   }
 }

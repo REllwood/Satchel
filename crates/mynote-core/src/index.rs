@@ -21,10 +21,14 @@ pub struct IndexStats {
     pub total: usize,
 }
 
-fn stem_lower(rel_path: &str) -> String {
+/// Filename without folder or `.md`, case preserved.
+fn file_stem(rel_path: &str) -> String {
     let file = rel_path.rsplit('/').next().unwrap_or(rel_path);
-    let stem = file.strip_suffix(".md").unwrap_or(file);
-    stem.to_lowercase()
+    file.strip_suffix(".md").unwrap_or(file).to_string()
+}
+
+fn stem_lower(rel_path: &str) -> String {
+    file_stem(rel_path).to_lowercase()
 }
 
 fn kind_str(kind: LinkKind) -> &'static str {
@@ -34,22 +38,45 @@ fn kind_str(kind: LinkKind) -> &'static str {
     }
 }
 
-/// Index a single scanned note. Returns its note id. Unchanged notes (same
-/// hash) are skipped cheaply.
+/// Index a single scanned note. Returns its note id.
+///
+/// Cheap paths, in order:
+/// 1. unchanged since last index (same mtime + size) → nothing is read, so a
+///    cloud-evicted file is never downloaded just to be re-checked;
+/// 2. contents only in the cloud → keep what we already indexed (still
+///    searchable offline), or record a lightweight stub for a new note;
+/// 3. read + hash; identical content just refreshes the stat info.
 pub fn index_note(conn: &Connection, note: &ScannedNote) -> Result<i64> {
-    let existing: Option<(i64, String, bool)> = conn
+    // (id, hash, materialized, mtime, size)
+    let existing: Option<(i64, String, bool, i64, i64)> = conn
         .query_row(
-            "SELECT id, hash, materialized FROM notes WHERE rel_path = ?1",
+            "SELECT id, hash, materialized, mtime, size FROM notes WHERE rel_path = ?1",
             [&note.rel_path],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get::<_, i64>(2)? != 0,
+                    r.get(3)?,
+                    r.get(4)?,
+                ))
+            },
         )
         .optional()?;
 
-    // Non-materialized (cloud-evicted) notes: record a stub with an EMPTY hash,
-    // so that when the file later re-materializes with identical bytes it is
-    // still detected as changed and re-indexed (otherwise the body is lost).
+    if let Some((id, _, true, mtime, size)) = &existing {
+        if *mtime == note.mtime_ms && *size == note.size as i64 {
+            return Ok(*id);
+        }
+    }
+
     if !note.materialized {
-        let title = stem_lower(&note.rel_path);
+        if let Some((id, ..)) = &existing {
+            return Ok(*id);
+        }
+        // Stub with an EMPTY hash: when the file is later downloaded it is
+        // always detected as changed and fully indexed.
+        let title = file_stem(&note.rel_path);
         let id = upsert_note_row(conn, note, &title, "null", "", "", "")?;
         conn.execute("DELETE FROM links WHERE src_note_id = ?1", [id])?;
         conn.execute("DELETE FROM tags WHERE note_id = ?1", [id])?;
@@ -59,9 +86,14 @@ pub fn index_note(conn: &Connection, note: &ScannedNote) -> Result<i64> {
 
     let bytes = std::fs::read(&note.abs_path)?;
     let hash = vault::content_hash(&bytes);
-    if let Some((id, old_hash, old_materialized)) = &existing {
-        // Skip only if unchanged AND already materialized (a stub has body="").
-        if *old_hash == hash && *old_materialized {
+    if let Some((id, old_hash, true, _, _)) = &existing {
+        if *old_hash == hash {
+            // Touched or re-synced without a content change: refresh the stat
+            // info so the fast path hits next time.
+            conn.execute(
+                "UPDATE notes SET mtime = ?2, size = ?3 WHERE id = ?1",
+                params![id, note.mtime_ms, note.size as i64],
+            )?;
             return Ok(*id);
         }
     }
@@ -69,8 +101,7 @@ pub fn index_note(conn: &Connection, note: &ScannedNote) -> Result<i64> {
     let content = String::from_utf8_lossy(&bytes);
     let parsed = parse::parse(&content);
     let title = if parsed.title.is_empty() {
-        let file = note.rel_path.rsplit('/').next().unwrap_or(&note.rel_path);
-        file.strip_suffix(".md").unwrap_or(file).to_string()
+        file_stem(&note.rel_path)
     } else {
         parsed.title.clone()
     };
@@ -80,6 +111,11 @@ pub fn index_note(conn: &Connection, note: &ScannedNote) -> Result<i64> {
     append_frontmatter_text(&parsed.frontmatter, &mut plaintext);
 
     let id = upsert_note_row(conn, note, &title, &fm, &parsed.body, &plaintext, &hash)?;
+
+    // Content changed: drop stale embeddings so they get rebuilt (by the
+    // background embedder, or right away by a caller that has one loaded).
+    crate::db::vec::delete_note_vectors(conn, id)?;
+    conn.execute("DELETE FROM chunks WHERE note_id = ?1", [id])?;
 
     // Replace links / tags / attachments for this note.
     conn.execute("DELETE FROM links WHERE src_note_id = ?1", [id])?;
@@ -269,17 +305,11 @@ pub fn index_single(conn: &Connection, root: &Path, rel_path: &str) -> Result<Op
     let abs = root.join(rel_path);
     let id = if abs.is_file() {
         let meta = std::fs::metadata(&abs)?;
-        let mtime_ms = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
         let scanned = ScannedNote {
             rel_path: rel_path.to_string(),
             abs_path: abs,
-            materialized: true,
-            mtime_ms,
+            materialized: !vault::is_dataless(&meta),
+            mtime_ms: vault::mtime_ms(&meta),
             size: meta.len(),
         };
         Some(index_note(conn, &scanned)?)
@@ -439,10 +469,26 @@ mod tests {
         assert_eq!(resolved, 0);
     }
 
+    fn body_of(conn: &Connection, id: i64) -> (String, i64) {
+        conn.query_row(
+            "SELECT body, materialized FROM notes WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    fn scanned(root: &Path, rel: &str) -> ScannedNote {
+        vault::scan_vault(root)
+            .into_iter()
+            .find(|n| n.rel_path == rel)
+            .unwrap()
+    }
+
     #[test]
-    fn rematerialized_file_with_same_bytes_is_reindexed() {
-        // Regression: a cloud file evicted then re-downloaded with identical
-        // bytes must not stay stuck as an empty stub.
+    fn evicted_note_keeps_its_indexed_content() {
+        // A note that iCloud/Google evicts to the cloud must stay searchable
+        // and must not be downloaded just to re-index it.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         fs::write(root.join("n.md"), "# N\n\nunique-token-xyz").unwrap();
@@ -450,35 +496,77 @@ mod tests {
         reindex_all(&conn, root).unwrap();
         let id = note_id_by_path(&conn, "n.md").unwrap().unwrap();
 
-        // Evict → stub (non-materialized): body cleared.
-        let stub = ScannedNote {
-            rel_path: "n.md".into(),
-            abs_path: root.join("n.md"),
-            materialized: false,
-            mtime_ms: 0,
-            size: 0,
-        };
-        index_note(&conn, &stub).unwrap();
-        let body: String = conn
-            .query_row("SELECT body FROM notes WHERE id=?1", [id], |r| r.get(0))
-            .unwrap();
-        assert_eq!(body, "", "stub clears the body");
+        let mut evicted = scanned(root, "n.md");
+        evicted.materialized = false;
+        index_note(&conn, &evicted).unwrap();
+        let (body, _) = body_of(&conn, id);
+        assert!(body.contains("unique-token-xyz"), "indexed content is kept");
 
-        // Re-materialize with the SAME bytes → must restore body + materialized.
-        let scanned = vault::scan_vault(root)
-            .into_iter()
-            .find(|n| n.rel_path == "n.md")
+        // Downloading it again (same bytes) keeps everything intact.
+        index_note(&conn, &scanned(root, "n.md")).unwrap();
+        let (body, mat) = body_of(&conn, id);
+        assert!(body.contains("unique-token-xyz"));
+        assert_eq!(mat, 1);
+    }
+
+    #[test]
+    fn never_indexed_cloud_note_is_a_stub_until_downloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("Cloud Note.md"), "# Cloud\n\nfetched-later").unwrap();
+        let conn = db::open_in_memory().unwrap();
+
+        let mut cloud_only = scanned(root, "Cloud Note.md");
+        cloud_only.materialized = false;
+        let id = index_note(&conn, &cloud_only).unwrap();
+        let (body, mat) = body_of(&conn, id);
+        assert_eq!((body.as_str(), mat), ("", 0), "stub: nothing read");
+        let title: String = conn
+            .query_row("SELECT title FROM notes WHERE id=?1", [id], |r| r.get(0))
             .unwrap();
-        index_note(&conn, &scanned).unwrap();
-        let (body, mat): (String, i64) = conn
-            .query_row(
-                "SELECT body, materialized FROM notes WHERE id=?1",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+        assert_eq!(title, "Cloud Note", "stub title keeps the filename's case");
+
+        // Once downloaded (same mtime/size) it is fully indexed.
+        index_note(&conn, &scanned(root, "Cloud Note.md")).unwrap();
+        let (body, mat) = body_of(&conn, id);
+        assert!(body.contains("fetched-later"));
+        assert_eq!(mat, 1);
+    }
+
+    #[test]
+    fn unchanged_file_is_not_reread() {
+        // Proves the mtime+size fast path: corrupt the stored hash, and an
+        // unchanged file still isn't re-read (hash stays corrupted).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.md"), "# A\n\nbody").unwrap();
+        let conn = db::open_in_memory().unwrap();
+        reindex_all(&conn, root).unwrap();
+        conn.execute("UPDATE notes SET hash = 'sentinel'", []).unwrap();
+        reindex_all(&conn, root).unwrap();
+        let hash: String = conn
+            .query_row("SELECT hash FROM notes", [], |r| r.get(0))
             .unwrap();
-        assert!(body.contains("unique-token-xyz"), "body restored on re-materialize");
-        assert_eq!(mat, 1, "materialized flag restored");
+        assert_eq!(hash, "sentinel", "file was not re-read");
+    }
+
+    #[test]
+    fn content_change_drops_stale_embedding_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.md"), "# A\n\noriginal").unwrap();
+        let conn = db::open_in_memory().unwrap();
+        reindex_all(&conn, root).unwrap();
+        let id = note_id_by_path(&conn, "a.md").unwrap().unwrap();
+        conn.execute("INSERT INTO chunks (note_id, text) VALUES (?1, 'old')", [id])
+            .unwrap();
+
+        fs::write(root.join("a.md"), "# A\n\nrewritten with more words").unwrap();
+        reindex_all(&conn, root).unwrap();
+        let chunks: i64 = conn
+            .query_row("SELECT count(*) FROM chunks WHERE note_id=?1", [id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(chunks, 0, "stale chunks removed so they get re-embedded");
     }
 
     #[test]

@@ -9,14 +9,14 @@
 use std::path::{Path, PathBuf};
 
 /// Folder name under the OS local-data directory.
-const APP_DIR_NAME: &str = "MyNote";
+const APP_DIR_NAME: &str = "Satchel";
 
-/// Root for MyNote's per-machine data. Honours `MYNOTE_DATA_DIR` (tests,
+/// Root for Satchel's per-machine data. Honours `SATCHEL_DATA_DIR` (tests,
 /// portable installs), else the OS local-data dir
 /// (`~/Library/Application Support` on macOS, `%LOCALAPPDATA%` on Windows,
 /// `~/.local/share` on Linux).
 pub fn data_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("MYNOTE_DATA_DIR") {
+    if let Some(dir) = std::env::var_os("SATCHEL_DATA_DIR") {
         return PathBuf::from(dir);
     }
     dirs::data_local_dir()

@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 
-use mynote_core::embed::Embedder;
-use mynote_core::rusqlite::Connection;
+use satchel_core::embed::Embedder;
+use satchel_core::rusqlite::Connection;
 
 /// An open vault: the writer connection, a sandboxed read-only query
 /// connection, and a lazily-loaded embedder.
@@ -20,7 +20,7 @@ pub struct Vault {
     /// RAII guard: held only to keep the file watcher alive; dropped (stopping
     /// the watch) when the vault is replaced or closed.
     #[allow(dead_code)]
-    pub watch: Option<mynote_core::watch::WatchGuard>,
+    pub watch: Option<satchel_core::watch::WatchGuard>,
 }
 
 /// Tauri-managed application state.

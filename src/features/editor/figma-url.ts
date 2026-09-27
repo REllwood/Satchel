@@ -9,5 +9,5 @@ export function toEmbedUrl(raw: string): string | null {
   const key = m[2];
   const node = /[?&]node-id=([^&\s]+)/.exec(raw);
   const nodeParam = node ? `&node-id=${encodeURIComponent(node[1])}` : "";
-  return `https://embed.figma.com/${type}/${key}?embed-host=mynote${nodeParam}`;
+  return `https://embed.figma.com/${type}/${key}?embed-host=satchel${nodeParam}`;
 }

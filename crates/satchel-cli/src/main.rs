@@ -1,21 +1,21 @@
-//! `mynote` — headless CLI + MCP server over `mynote-core`.
+//! `satchel` — headless CLI + MCP server over `satchel-core`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use mynote_core::rusqlite::Connection;
-use mynote_core::search::semantic;
-use mynote_core::{agents, db, embed, index, parse, query, search, vault};
+use satchel_core::rusqlite::Connection;
+use satchel_core::search::semantic;
+use satchel_core::{agents, db, embed, index, parse, query, search, vault};
 
 #[derive(Parser)]
 #[command(
-    name = "mynote",
+    name = "satchel",
     version,
-    about = "MyNote — local-first notes CLI + MCP server"
+    about = "Satchel — local-first notes CLI + MCP server"
 )]
 struct Cli {
-    /// Vault folder (default: $MYNOTE_VAULT, else the current directory).
+    /// Vault folder (default: $SATCHEL_VAULT, else the current directory).
     #[arg(long, global = true)]
     vault: Option<PathBuf>,
     #[command(subcommand)]
@@ -59,13 +59,13 @@ enum Command {
 }
 
 fn resolve_vault(opt: Option<PathBuf>) -> PathBuf {
-    opt.or_else(|| std::env::var_os("MYNOTE_VAULT").map(PathBuf::from))
+    opt.or_else(|| std::env::var_os("SATCHEL_VAULT").map(PathBuf::from))
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 /// The per-machine index (shared with the desktop app), outside the vault.
 fn db_path(root: &Path) -> PathBuf {
-    mynote_core::paths::index_db_path(root)
+    satchel_core::paths::index_db_path(root)
 }
 
 /// Open the index and bring it current (incremental reindex).
@@ -111,6 +111,7 @@ fn main() -> Result<()> {
             } else {
                 search::fts::search_fulltext(&conn, &q, limit)?
             };
+            let hits: Vec<_> = hits.into_iter().map(search::SearchHit::with_bracket_marks).collect();
             if json {
                 println!("{}", serde_json::to_string_pretty(&hits)?);
             } else {
@@ -168,7 +169,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Mcp => {
-            mynote_core::mcp::run(&root)?;
+            satchel_core::mcp::run(&root)?;
         }
     }
     Ok(())

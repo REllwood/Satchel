@@ -128,7 +128,7 @@ export function VaultProvider({ children }: { children: ReactNode }) {
         const info = await api.createVault(path);
         await adopt(info);
         // Open the welcome note in a brand-new vault.
-        if (info.note_count === 1) setSelected("Welcome to MyNote.md");
+        if (info.note_count === 1) setSelected("Welcome to Satchel.md");
       } catch (e) {
         toast.error(`${e}`);
       } finally {

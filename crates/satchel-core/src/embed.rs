@@ -86,13 +86,13 @@ impl Embedder {
 
 /// Resolve the bundled model directory for the running binary.
 ///
-/// Order: `MYNOTE_MODEL_DIR`; the model shipped alongside this executable
+/// Order: `SATCHEL_MODEL_DIR`; the model shipped alongside this executable
 /// (macOS `.app` Resources, next to the binary, Linux package lib dir); an
-/// installed `MyNote.app` (so the CLI can reuse the app's model); finally the
+/// installed `Satchel.app` (so the CLI can reuse the app's model); finally the
 /// source checkout (dev and tests). The desktop app passes Tauri's resolved
 /// resource path explicitly.
 pub fn default_model_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("MYNOTE_MODEL_DIR") {
+    if let Some(dir) = std::env::var_os("SATCHEL_MODEL_DIR") {
         return PathBuf::from(dir);
     }
     let rel = Path::new("models").join(DEFAULT_MODEL);
@@ -103,10 +103,10 @@ pub fn default_model_dir() -> PathBuf {
     {
         candidates.push(exe_dir.join("../Resources").join(&rel));
         candidates.push(exe_dir.join(&rel));
-        candidates.push(exe_dir.join("../lib/MyNote").join(&rel));
+        candidates.push(exe_dir.join("../lib/Satchel").join(&rel));
     }
     #[cfg(target_os = "macos")]
-    candidates.push(Path::new("/Applications/MyNote.app/Contents/Resources").join(&rel));
+    candidates.push(Path::new("/Applications/Satchel.app/Contents/Resources").join(&rel));
 
     let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets").join(&rel);
     candidates

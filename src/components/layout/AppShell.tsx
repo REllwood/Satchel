@@ -196,8 +196,9 @@ export function AppShell() {
           </TooltipTrigger>
           <TooltipContent>Toggle notes</TooltipContent>
         </Tooltip>
-        <span className="ml-1 select-none font-semibold tracking-tight">
-          MyNote
+        <span className="ml-1 flex select-none items-center gap-2 font-semibold tracking-tight">
+          <img src="/icon.svg" alt="" className="size-5" draggable={false} />
+          Satchel
         </span>
         <div className="flex-1" />
         <Tooltip>
@@ -282,7 +283,7 @@ export function AppShell() {
       </header>
 
       <div className="min-h-0 flex-1">
-        <ResizablePanelGroup direction="horizontal" autoSaveId="mynote-layout">
+        <ResizablePanelGroup direction="horizontal" autoSaveId="satchel-layout">
           <ResizablePanel
             ref={leftRef}
             order={1}

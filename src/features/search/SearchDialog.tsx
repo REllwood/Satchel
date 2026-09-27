@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   Command,
@@ -28,6 +28,7 @@ export function SearchDialog({
 }) {
   const { select } = useVault();
   const [query, setQuery] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
   const [mode, setMode] = useState<Mode>("fulltext");
   const [hits, setHits] = useState<api.SearchHit[]>([]);
   const [loading, setLoading] = useState(false);
@@ -70,7 +71,10 @@ export function SearchDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="overflow-hidden p-0" showCloseButton={false}>
+      <DialogContent
+        className="top-[14%] translate-y-0 overflow-hidden p-0"
+        showCloseButton={false}
+      >
         <DialogTitle className="sr-only">Search notes</DialogTitle>
         <Command shouldFilter={false}>
           <div className="flex gap-1 border-b px-2 py-1.5">
@@ -80,19 +84,25 @@ export function SearchDialog({
             size="sm"
             variant={mode === m ? "default" : "ghost"}
             className="h-6 px-2 text-xs capitalize"
-            onClick={() => setMode(m)}
+            onClick={() => {
+              setMode(m);
+              inputRef.current?.focus(); // keep typing without another click
+            }}
           >
             {m === "fulltext" ? "Full-text" : m}
           </Button>
         ))}
       </div>
       <CommandInput
+        ref={inputRef}
+        autoFocus
         value={query}
         onValueChange={setQuery}
         placeholder="Search notes…"
       />
       <CommandList>
-        {loading && (
+        {/* Keep the previous results on screen while the next search runs. */}
+        {loading && hits.length === 0 && (
           <div className="px-3 py-3 text-sm text-muted-foreground">searching…</div>
         )}
         {!loading && query.trim() !== "" && hits.length === 0 && (
@@ -111,7 +121,7 @@ export function SearchDialog({
             <span className="truncate font-medium">{hit.title || hit.rel_path}</span>
             {hit.snippet && (
               <span className="line-clamp-1 text-xs text-muted-foreground">
-                {hit.snippet}
+                <Snippet text={hit.snippet} />
               </span>
             )}
           </CommandItem>
@@ -120,5 +130,23 @@ export function SearchDialog({
         </Command>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** Render a snippet, highlighting matches the backend wrapped in \u0002…\u0003. */
+function Snippet({ text }: { text: string }) {
+  const parts = text.split(/\u0002([^\u0003]*)\u0003/);
+  return (
+    <>
+      {parts.map((part, i) =>
+        i % 2 === 1 ? (
+          <mark key={i} className="rounded-sm bg-primary/15 px-0.5 font-medium text-foreground">
+            {part}
+          </mark>
+        ) : (
+          part
+        ),
+      )}
+    </>
   );
 }

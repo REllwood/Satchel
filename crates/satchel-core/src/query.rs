@@ -119,7 +119,7 @@ mod tests {
             )
             .unwrap();
         }
-        let db_path = dir.path().join(".mynote/index.db");
+        let db_path = dir.path().join(".satchel/index.db");
         {
             let conn = db::open(&db_path).unwrap();
             index::reindex_all(&conn, dir.path()).unwrap();

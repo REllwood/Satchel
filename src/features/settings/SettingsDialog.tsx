@@ -95,7 +95,7 @@ export function SettingsDialog({
         <DialogHeader>
           <DialogTitle>Settings</DialogTitle>
           <DialogDescription>
-            Everything runs on this computer. MyNote never sends your notes anywhere.
+            Everything runs on this computer. Satchel never sends your notes anywhere.
           </DialogDescription>
         </DialogHeader>
 
@@ -206,7 +206,7 @@ export function SettingsDialog({
 
           <Row label="About" hint="Open source under the MIT license.">
             <span className="text-xs tabular-nums text-muted-foreground">
-              MyNote v{version}
+              Satchel v{version}
             </span>
           </Row>
         </div>

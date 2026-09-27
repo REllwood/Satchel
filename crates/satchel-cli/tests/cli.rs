@@ -1,15 +1,15 @@
-//! End-to-end CLI integration tests — run the real `mynote` binary against a
+//! End-to-end CLI integration tests — run the real `satchel` binary against a
 //! temp vault. Exercises the same core path the desktop app uses.
 
 use std::fs;
 use std::process::Command;
 
-fn mynote(vault: &std::path::Path) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_mynote"));
+fn satchel(vault: &std::path::Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_satchel"));
     cmd.arg("--vault").arg(vault);
     // Keep the per-machine index inside the test's temp dir (a hidden folder
     // the scanner ignores), never in the user's real app-data folder.
-    cmd.env("MYNOTE_DATA_DIR", vault.join(".mynote-test-data"));
+    cmd.env("SATCHEL_DATA_DIR", vault.join(".satchel-test-data"));
     cmd
 }
 
@@ -20,18 +20,18 @@ fn init_search_query_new_flow() {
     fs::write(root.join("alpha.md"), "# Alpha\n\nthe zebra crossed the road #animals").unwrap();
 
     // init: builds index + writes AGENTS.md/CLAUDE.md
-    let out = mynote(root).arg("init").output().unwrap();
+    let out = satchel(root).arg("init").output().unwrap();
     assert!(out.status.success(), "init failed: {}", String::from_utf8_lossy(&out.stderr));
     assert!(root.join("AGENTS.md").exists());
     assert!(root.join("CLAUDE.md").exists());
 
     // search finds the note by a distinctive word
-    let out = mynote(root).args(["search", "zebra"]).output().unwrap();
+    let out = satchel(root).args(["search", "zebra"]).output().unwrap();
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("alpha.md"));
 
     // read-only query returns rows
-    let out = mynote(root)
+    let out = satchel(root)
         .args(["query", "SELECT count(*) AS n FROM notes", "--json"])
         .output()
         .unwrap();
@@ -39,11 +39,11 @@ fn init_search_query_new_flow() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("\"n\""));
 
     // a write query is rejected (sandbox) — non-zero exit
-    let out = mynote(root).args(["query", "DELETE FROM notes"]).output().unwrap();
+    let out = satchel(root).args(["query", "DELETE FROM notes"]).output().unwrap();
     assert!(!out.status.success(), "write query should be rejected");
 
     // create a new note
-    let out = mynote(root).args(["new", "My Idea"]).output().unwrap();
+    let out = satchel(root).args(["new", "My Idea"]).output().unwrap();
     assert!(out.status.success());
     assert!(root.join("My Idea.md").exists());
 }
@@ -55,7 +55,7 @@ fn mcp_lists_tools_and_searches() {
     fs::write(root.join("note.md"), "# Note\n\npineapple express").unwrap();
 
     use std::io::Write;
-    let mut child = mynote(root)
+    let mut child = satchel(root)
         .arg("mcp")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

@@ -13,7 +13,7 @@ dist-ssr
 *.local
 
 # Rust / Cargo — workspace build output lives at the repo root because this is
-# a Cargo workspace (the app, mynote-core, and mynote-cli share one target dir).
+# a Cargo workspace (the app, satchel-core, and satchel-cli share one target dir).
 # This is large and fully regenerable — never commit it.
 /target
 
@@ -34,3 +34,6 @@ docs/
 *.njsproj
 *.sln
 *.sw?
+
+# Local build/export output and generated media scratch (one reused folder)
+.build/

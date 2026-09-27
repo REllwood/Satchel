@@ -36,7 +36,9 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 }
 
 export function ContextPanel() {
-  const { selected, select } = useVault();
+  // `notes` changes whenever the vault does (own saves included), which keeps
+  // the outline and backlinks current while you type.
+  const { selected, select, notes } = useVault();
   const [backlinks, setBacklinks] = useState<api.Backlink[]>([]);
   const [headings, setHeadings] = useState<Heading[]>([]);
 
@@ -58,7 +60,7 @@ export function ContextPanel() {
     return () => {
       cancelled = true;
     };
-  }, [selected]);
+  }, [selected, notes]);
 
   if (!selected) {
     return (

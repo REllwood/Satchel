@@ -4,7 +4,7 @@
 @custom-variant dark (&:is(.dark *));
 
 /* ------------------------------------------------------------------ *
- * MyNote design tokens — "Graphite + Indigo"
+ * Satchel design tokens — "Graphite + Indigo"
  * Cool neutral graphite surfaces with a refined indigo accent.
  * Primary is indigo-600-ish so white text on it stays >= WCAG AA 4.5:1.
  * ------------------------------------------------------------------ */
@@ -20,6 +20,13 @@
   --popover-foreground: oklch(0.21 0.02 265);
 
   --primary: oklch(0.515 0.21 277);
+
+  /* Syntax colours for fenced code blocks */
+  --code-keyword: oklch(0.5 0.2 305);
+  --code-string: oklch(0.52 0.13 155);
+  --code-number: oklch(0.58 0.15 55);
+  --code-function: oklch(0.5 0.16 255);
+  --code-type: oklch(0.52 0.1 195);
   --primary-foreground: oklch(0.985 0.002 265);
 
   --secondary: oklch(0.967 0.004 265);
@@ -64,6 +71,12 @@
   --popover-foreground: oklch(0.96 0.004 265);
 
   --primary: oklch(0.585 0.21 277);
+
+  --code-keyword: oklch(0.74 0.15 305);
+  --code-string: oklch(0.78 0.13 155);
+  --code-number: oklch(0.8 0.13 65);
+  --code-function: oklch(0.76 0.12 245);
+  --code-type: oklch(0.78 0.1 195);
   --primary-foreground: oklch(0.985 0.002 265);
 
   --secondary: oklch(0.27 0.018 265);
@@ -178,4 +191,53 @@
       scroll-behavior: auto !important;
     }
   }
+}
+
+/* Canvas (React Flow) cards styled with the app's tokens. */
+.react-flow .react-flow__node-default {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--card);
+  color: var(--card-foreground);
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.06), 0 4px 12px -6px rgb(0 0 0 / 0.12);
+}
+.react-flow .react-flow__node-default.selected {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 25%, transparent);
+}
+.react-flow .react-flow__node-default.canvas-file {
+  border-left: 3px solid var(--primary);
+}
+.react-flow .react-flow__node-default.canvas-text {
+  background: color-mix(in srgb, var(--primary) 8%, var(--card));
+}
+.react-flow .react-flow__node-default.canvas-link {
+  color: var(--primary);
+  font-size: 12px;
+}
+.react-flow .react-flow__node-default.canvas-group {
+  align-items: flex-start;
+  justify-content: flex-start;
+  background: color-mix(in srgb, var(--primary) 5%, transparent);
+  border: 1.5px dashed color-mix(in srgb, var(--primary) 45%, transparent);
+  box-shadow: none;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.react-flow .react-flow__edge-path {
+  stroke: color-mix(in srgb, var(--primary) 50%, var(--muted-foreground));
+  stroke-width: 1.5;
+}
+.react-flow .react-flow__handle {
+  background: var(--primary);
+  border: none;
 }

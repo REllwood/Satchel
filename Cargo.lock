@@ -2788,53 +2788,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mynote-app"
-version = "0.1.0"
-dependencies = [
- "mynote-core",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "trash",
-]
-
-[[package]]
-name = "mynote-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "mynote-core",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "mynote-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "dirs 7.0.0",
- "fastembed",
- "notify",
- "notify-debouncer-full",
- "pulldown-cmark",
- "regex",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "sqlite-vec",
- "tempfile",
- "thiserror 2.0.18",
- "walkdir",
-]
-
-[[package]]
 name = "native-tls"
 version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4175,6 +4128,53 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "satchel-app"
+version = "0.1.0"
+dependencies = [
+ "satchel-core",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "trash",
+]
+
+[[package]]
+name = "satchel-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "satchel-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "satchel-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "dirs 7.0.0",
+ "fastembed",
+ "notify",
+ "notify-debouncer-full",
+ "pulldown-cmark",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sqlite-vec",
+ "tempfile",
+ "thiserror 2.0.18",
+ "walkdir",
 ]
 
 [[package]]

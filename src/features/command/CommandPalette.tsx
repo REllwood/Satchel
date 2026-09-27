@@ -25,7 +25,10 @@ export function CommandPalette({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="overflow-hidden p-0" showCloseButton={false}>
+      <DialogContent
+        className="top-[14%] translate-y-0 overflow-hidden p-0"
+        showCloseButton={false}
+      >
         <DialogTitle className="sr-only">Command palette</DialogTitle>
         <Command>
           <CommandInput placeholder="Type a command…" />

@@ -1,6 +1,6 @@
 //! Find cloud-synced folders (iCloud Drive, Google Drive, Dropbox, OneDrive,
 //! Box) so the app can offer "keep my notes in iCloud / Google Drive" in one
-//! click. MyNote never talks to a cloud API: the provider's own desktop client
+//! click. Satchel never talks to a cloud API: the provider's own desktop client
 //! syncs the folder, so notes stay plain files the user fully owns.
 
 use std::path::{Path, PathBuf};
@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Name of the folder created inside the chosen location.
-pub const VAULT_FOLDER_NAME: &str = "MyNote";
+pub const VAULT_FOLDER_NAME: &str = "Satchel";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -41,7 +41,7 @@ pub struct SyncLocation {
     pub provider: Provider,
     /// Human label, e.g. "Google Drive (me@gmail.com)".
     pub label: String,
-    /// The vault folder MyNote would use (`<location>/MyNote`).
+    /// The vault folder Satchel would use (`<location>/Satchel`).
     pub vault_path: String,
     /// True if that folder already exists (open instead of create).
     pub vault_exists: bool,
@@ -184,7 +184,8 @@ mod tests {
         );
         let gdrive = found.iter().find(|l| l.provider == Provider::GoogleDrive).unwrap();
         assert!(gdrive.label.contains("me@gmail.com"));
-        assert!(gdrive.vault_path.ends_with("My Drive/MyNote"));
+        // Compare path components, so the test holds with Windows separators too.
+        assert!(Path::new(&gdrive.vault_path).ends_with(Path::new("My Drive").join(VAULT_FOLDER_NAME)));
         assert!(!gdrive.vault_exists);
         let onedrive = found.iter().find(|l| l.provider == Provider::OneDrive).unwrap();
         assert_eq!(onedrive.label, "OneDrive (Personal)");
@@ -202,7 +203,7 @@ mod tests {
     fn reports_existing_vault() {
         let home = tempfile::tempdir().unwrap();
         let icloud = home.path().join("Library/Mobile Documents/com~apple~CloudDocs");
-        fs::create_dir_all(icloud.join("MyNote")).unwrap();
+        fs::create_dir_all(icloud.join("Satchel")).unwrap();
         let found = detect_locations_in(home.path());
         assert!(found[0].vault_exists);
     }
@@ -210,12 +211,12 @@ mod tests {
     #[test]
     fn provider_for_path_recognises_providers() {
         let cases = [
-            ("/Users/a/Library/Mobile Documents/com~apple~CloudDocs/MyNote", Provider::ICloud),
-            ("/Users/a/Library/CloudStorage/GoogleDrive-a@b.com/My Drive/MyNote", Provider::GoogleDrive),
-            ("/Users/a/Library/CloudStorage/Dropbox/MyNote", Provider::Dropbox),
-            ("/Users/a/Library/CloudStorage/OneDrive-Personal/MyNote", Provider::OneDrive),
-            (r"C:\Users\a\iCloudDrive\MyNote", Provider::ICloud),
-            ("/Users/a/MyNote", Provider::Local),
+            ("/Users/a/Library/Mobile Documents/com~apple~CloudDocs/Satchel", Provider::ICloud),
+            ("/Users/a/Library/CloudStorage/GoogleDrive-a@b.com/My Drive/Satchel", Provider::GoogleDrive),
+            ("/Users/a/Library/CloudStorage/Dropbox/Satchel", Provider::Dropbox),
+            ("/Users/a/Library/CloudStorage/OneDrive-Personal/Satchel", Provider::OneDrive),
+            (r"C:\Users\a\iCloudDrive\Satchel", Provider::ICloud),
+            ("/Users/a/Satchel", Provider::Local),
         ];
         for (path, want) in cases {
             assert_eq!(provider_for_path(Path::new(path)), want, "{path}");

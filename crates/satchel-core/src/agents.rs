@@ -5,16 +5,16 @@ use std::path::Path;
 
 use anyhow::Result;
 
-const AGENTS_MD: &str = r#"# Working in this MyNote vault
+const AGENTS_MD: &str = r#"# Working in this Satchel vault
 
-This folder is a **MyNote** vault: plain Markdown notes you (and AI tools) co-own.
+This folder is a **Satchel** vault: plain Markdown notes you (and AI tools) co-own.
 Everything here is just files — safe to read and edit directly.
 
 ## Layout
 - `**/*.md` — notes. Optional YAML frontmatter at the top (`---` … `---`).
 - `attachments/` — images and other embedded files.
 - `*.canvas` — JSONCanvas boards (https://jsoncanvas.org).
-- MyNote's search index lives outside this folder (per machine) and is rebuilt
+- Satchel's search index lives outside this folder (per machine) and is rebuilt
   from the files — the files here are the only source of truth.
 
 ## Conventions
@@ -22,23 +22,23 @@ Everything here is just files — safe to read and edit directly.
 - **Links**: `[[Note Title]]`, `[[Note#Heading]]`, `[[Note|alias]]`. Embeds: `![[image.png]]`.
 - **Tags**: frontmatter `tags: [a, b]` and/or inline `#tag` (nesting allowed: `#area/sub`).
 - **Code**: fenced blocks. ` ```mermaid ` renders as a diagram.
-- To **add a note**: create a `.md` file with a `# Title` and write Markdown. MyNote indexes it automatically.
+- To **add a note**: create a `.md` file with a `# Title` and write Markdown. Satchel indexes it automatically.
 
-## Driving MyNote from an agent
-The MyNote app is also an MCP server (search, semantic search, read-only SQL,
-read and create notes) — run it as `<MyNote app binary> mcp --vault "<this folder>"`.
-In MyNote, **Settings → AI tools** copies the exact command for this computer.
-- **Claude Code**: `claude mcp add --transport stdio mynote -- <MyNote app binary> mcp --vault "<this folder>"`
+## Driving Satchel from an agent
+The Satchel app is also an MCP server (search, semantic search, read-only SQL,
+read and create notes) — run it as `<Satchel app binary> mcp --vault "<this folder>"`.
+In Satchel, **Settings → AI tools** copies the exact command for this computer.
+- **Claude Code**: `claude mcp add --transport stdio satchel -- <Satchel app binary> mcp --vault "<this folder>"`
 - **Codex**: add to `~/.codex/config.toml`:
-  `[mcp_servers.mynote]` with `command = "<MyNote app binary>"`, `args = ["mcp", "--vault", "<this folder>"]`
-- The optional `mynote` CLI does the same from a shell: `mynote search "<query>" --vault "<this folder>"`,
-  `mynote query "SELECT rel_path FROM notes" --vault "<this folder>"` (read-only SQL).
+  `[mcp_servers.satchel]` with `command = "<Satchel app binary>"`, `args = ["mcp", "--vault", "<this folder>"]`
+- The optional `satchel` CLI does the same from a shell: `satchel search "<query>" --vault "<this folder>"`,
+  `satchel query "SELECT rel_path FROM notes" --vault "<this folder>"` (read-only SQL).
 "#;
 
-const CLAUDE_MD: &str = r#"# MyNote vault
+const CLAUDE_MD: &str = r#"# Satchel vault
 
 See [AGENTS.md](AGENTS.md) for how this vault is structured and how to drive
-MyNote (search, query, MCP). Notes are plain Markdown — edit files directly.
+Satchel (search, query, MCP). Notes are plain Markdown — edit files directly.
 "#;
 
 fn write_if_absent(path: &Path, content: &str) -> Result<()> {

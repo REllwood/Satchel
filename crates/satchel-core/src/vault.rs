@@ -13,7 +13,7 @@ use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
 /// Directory names that never contain user notes.
-const SKIP_DIRS: &[&str] = &[".mynote", ".git", ".obsidian", "node_modules", ".trash"];
+const SKIP_DIRS: &[&str] = &[".satchel", ".git", ".obsidian", "node_modules", ".trash"];
 
 /// A note (or placeholder) discovered during a vault scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +53,7 @@ pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let mut tmp = tempfile::Builder::new()
-        .prefix(".mynote-tmp-")
+        .prefix(".satchel-tmp-")
         .tempfile_in(parent)?;
     tmp.write_all(bytes)?;
     tmp.flush()?;
@@ -303,8 +303,8 @@ mod tests {
         write(&root.join("a.md"), "# A");
         write(&root.join("sub/b.md"), "# B");
         write(&root.join("notes.txt"), "ignored");
-        write(&root.join(".mynote/index.db"), "db");
-        write(&root.join(".mynote/c.md"), "# hidden, ignored");
+        write(&root.join(".satchel/index.db"), "db");
+        write(&root.join(".satchel/c.md"), "# hidden, ignored");
         write(&root.join("node_modules/d.md"), "# dep, ignored");
 
         let mut paths: Vec<_> = scan_vault(root).into_iter().map(|n| n.rel_path).collect();
@@ -358,7 +358,7 @@ mod tests {
         fs::create_dir_all(root.join("Work/Projects")).unwrap();
         fs::create_dir_all(root.join("Personal")).unwrap();
         fs::create_dir_all(root.join("attachments")).unwrap();
-        fs::create_dir_all(root.join(".mynote")).unwrap();
+        fs::create_dir_all(root.join(".satchel")).unwrap();
         fs::create_dir_all(root.join(".obsidian")).unwrap();
         assert_eq!(
             list_dirs(root),

@@ -1,6 +1,6 @@
 //! SQLite index: connection setup, schema, and migrations.
 //!
-//! The database under `<vault>/.mynote/index.db` is a *derived cache* — it can
+//! The database under `<vault>/.satchel/index.db` is a *derived cache* — it can
 //! be rebuilt from the vault at any time. The app is the single writer and runs
 //! in WAL mode so the CLI/MCP can read concurrently.
 
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn file_db_uses_wal_and_reopen_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".mynote/index.db");
+        let path = dir.path().join(".satchel/index.db");
         {
             let conn = open(&path).unwrap();
             let mode: String = conn

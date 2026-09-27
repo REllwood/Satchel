@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "MyNote",
+  "productName": "Satchel",
   "version": "0.1.0",
-  "identifier": "io.github.rellwood.mynote",
+  "identifier": "io.github.rellwood.satchel",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "MyNote",
+        "title": "Satchel",
         "width": 1280,
         "height": 832,
         "minWidth": 720,
@@ -35,12 +35,12 @@
     ],
     "category": "Productivity",
     "shortDescription": "Local-first notes that sync through your own cloud folder",
-    "longDescription": "MyNote keeps your notes as plain Markdown files in a folder you choose — iCloud Drive, Google Drive, Dropbox, OneDrive or just this computer — with full-text and semantic search, backlinks, a graph, canvases and an MCP server for Claude Code and Codex. Everything runs locally.",
-    "copyright": "Copyright © 2026 the MyNote contributors",
+    "longDescription": "Satchel keeps your notes as plain Markdown files in a folder you choose: iCloud Drive, Google Drive, Dropbox, OneDrive or just this computer. It has full-text and semantic search, backlinks, a graph, canvases and an MCP server for Claude Code and Codex, and it runs entirely on your computer.",
+    "copyright": "Copyright © 2026 the Satchel contributors",
     "license": "MIT",
     "homepage": "https://github.com/REllwood/Satchel",
     "resources": {
-      "../crates/mynote-core/assets/models/all-MiniLM-L6-v2/": "models/all-MiniLM-L6-v2/"
+      "../crates/satchel-core/assets/models/all-MiniLM-L6-v2/": "models/all-MiniLM-L6-v2/"
     },
     "macOS": {
       "minimumSystemVersion": "13.4",

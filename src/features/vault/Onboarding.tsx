@@ -58,14 +58,17 @@ export function Onboarding() {
   return (
     <div className="flex h-full items-start justify-center overflow-y-auto bg-background px-4 py-12 sm:items-center">
       <div className="w-full max-w-xl">
-        <p className="text-sm font-semibold tracking-tight text-primary">MyNote</p>
+        <p className="flex items-center gap-2 text-sm font-semibold tracking-tight text-primary">
+          <img src="/icon.svg" alt="" className="size-7" draggable={false} />
+          Satchel
+        </p>
         <h1 className="mt-2 text-2xl font-semibold tracking-tight">
           Where should your notes live?
         </h1>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
           Your notes are plain Markdown files in a folder you choose. Pick a
           cloud folder and they sync to your other devices through that
-          service — MyNote itself never uploads anything.
+          service — Satchel itself never uploads anything.
         </p>
 
         <div className="mt-6 flex flex-col gap-2" role="list" aria-label="Locations">

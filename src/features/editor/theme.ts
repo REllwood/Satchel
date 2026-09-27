@@ -37,6 +37,37 @@ export const editorTheme = EditorView.theme({
     color: "var(--muted-foreground)",
     textDecorationStyle: "dashed",
   },
+  ".cm-tag": {
+    color: "var(--accent-foreground)",
+    backgroundColor: "var(--accent)",
+    borderRadius: "999px",
+    padding: "0.1em 0.55em",
+    fontSize: "0.85em",
+    fontWeight: "500",
+  },
+  ".cm-codeblock": {
+    fontFamily: "var(--font-mono)",
+    fontSize: "0.88em",
+    backgroundColor: "color-mix(in oklch, var(--muted) 75%, transparent)",
+    padding: "0 0.9rem !important",
+  },
+  ".cm-codeblock *": { backgroundColor: "transparent !important" },
+  ".cm-codeblock-first": {
+    borderTopLeftRadius: "var(--radius)",
+    borderTopRightRadius: "var(--radius)",
+    paddingTop: "0.35rem !important",
+  },
+  ".cm-codeblock-last": {
+    borderBottomLeftRadius: "var(--radius)",
+    borderBottomRightRadius: "var(--radius)",
+    paddingBottom: "0.35rem !important",
+  },
+  ".cm-code-info": {
+    color: "var(--muted-foreground)",
+    fontSize: "0.75em",
+    textTransform: "uppercase",
+    letterSpacing: "0.06em",
+  },
   ".cm-image-embed": { padding: "0.35rem 0" },
   ".cm-image-embed img": {
     maxWidth: "min(100%, 40rem)",
@@ -45,9 +76,10 @@ export const editorTheme = EditorView.theme({
     border: "1px solid var(--border)",
   },
   ".cm-mermaid": {
-    padding: "0.5rem 0",
+    padding: "0.75rem 0",
     display: "flex",
     justifyContent: "center",
+    cursor: "pointer",
   },
   ".cm-mermaid svg": { maxWidth: "100%" },
   ".cm-mermaid-error": {
@@ -86,4 +118,11 @@ export const mdHighlight = HighlightStyle.define([
   { tag: t.quote, color: "var(--muted-foreground)", fontStyle: "italic" },
   { tag: [t.processingInstruction, t.list], color: "var(--muted-foreground)" },
   { tag: t.contentSeparator, color: "var(--muted-foreground)" },
+  // Code inside fenced blocks (nested language parsers).
+  { tag: [t.keyword, t.controlKeyword, t.moduleKeyword, t.operatorKeyword], color: "var(--code-keyword)" },
+  { tag: [t.string, t.special(t.string), t.regexp], color: "var(--code-string)" },
+  { tag: [t.number, t.bool, t.null, t.atom], color: "var(--code-number)" },
+  { tag: [t.comment, t.lineComment, t.blockComment], color: "var(--muted-foreground)", fontStyle: "italic" },
+  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "var(--code-function)" },
+  { tag: [t.typeName, t.className, t.namespace], color: "var(--code-type)" },
 ]);

@@ -1,17 +1,17 @@
-//! Tauri command surface. Thin wrappers over `mynote-core`; all errors are
+//! Tauri command surface. Thin wrappers over `satchel-core`; all errors are
 //! mapped to strings at this boundary. The frontend only ever talks to these.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-use mynote_core::canvas::{self, Canvas};
-use mynote_core::cloud::{self, Provider, SyncLocation};
-use mynote_core::embed::Embedder;
-use mynote_core::index::{self, IndexStats};
-use mynote_core::query::{self, QueryResult};
-use mynote_core::search::{self, semantic, SearchHit};
-use mynote_core::{agents, db, paths, rusqlite, vault, watch};
+use satchel_core::canvas::{self, Canvas};
+use satchel_core::cloud::{self, Provider, SyncLocation};
+use satchel_core::embed::Embedder;
+use satchel_core::index::{self, IndexStats};
+use satchel_core::query::{self, QueryResult};
+use satchel_core::search::{self, semantic, SearchHit};
+use satchel_core::{agents, db, paths, rusqlite, vault, watch};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -221,12 +221,12 @@ fn welcome_note(provider: Provider) -> String {
     let sync = match provider {
         Provider::Local => "They're stored only on this computer.".to_string(),
         p => format!(
-            "{} keeps them in sync across your devices — MyNote itself never uploads anything.",
+            "{} keeps them in sync across your devices — Satchel itself never uploads anything.",
             p.display_name()
         ),
     };
     format!(
-        "# Welcome to MyNote\n\n\
+        "# Welcome to Satchel\n\n\
          Your notes are plain Markdown files in this folder. {sync}\n\n\
          - Create a note with **+**, or a folder (notebook) with the folder button next to it.\n\
          - Link notes with `[[double brackets]]`.\n\
@@ -255,7 +255,7 @@ pub fn create_vault(
     fs::create_dir_all(&root).map_err(|e| format!("Couldn't create {path}: {e}"))?;
     if vault::scan_vault(&root).is_empty() {
         let welcome = welcome_note(cloud::provider_for_path(&root));
-        vault::write_note_atomic(&root.join("Welcome to MyNote.md"), &welcome).map_err(es)?;
+        vault::write_note_atomic(&root.join("Welcome to Satchel.md"), &welcome).map_err(es)?;
     }
     open_vault_at(&app, &state, root)
 }
@@ -415,12 +415,12 @@ pub fn agent_setup(state: State<AppState>) -> Result<AgentSetup, String> {
     let q = |s: &str| serde_json::to_string(s).unwrap_or_default();
     Ok(AgentSetup {
         claude_code: format!(
-            "claude mcp add --transport stdio mynote -- {} mcp --vault {}",
+            "claude mcp add --transport stdio satchel -- {} mcp --vault {}",
             q(&exe),
             q(&root)
         ),
         codex: format!(
-            "[mcp_servers.mynote]\ncommand = {}\nargs = [\"mcp\", \"--vault\", {}]\n",
+            "[mcp_servers.satchel]\ncommand = {}\nargs = [\"mcp\", \"--vault\", {}]\n",
             q(&exe),
             q(&root)
         ),

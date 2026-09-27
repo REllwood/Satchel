@@ -34,7 +34,7 @@ const STARTERS: { label: string; sql: string }[] = [
   },
 ];
 
-const STORAGE_KEY = "mynote-saved-queries";
+const STORAGE_KEY = "satchel-saved-queries";
 
 interface SavedQuery {
   name: string;
@@ -88,7 +88,7 @@ export function QueryDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[80vh] w-[80vw] max-w-[80vw] flex-col gap-0 p-0">
+      <DialogContent className="flex h-[80vh] w-[80vw] max-w-[80vw] flex-col gap-0 p-0 sm:max-w-[80vw]">
         <DialogHeader className="border-b px-4 py-2">
           <DialogTitle>
             Query{" "}

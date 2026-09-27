@@ -20,7 +20,8 @@ jobs:
           # longer ships Intel macOS builds.
           - platform: macos-latest
             args: --target aarch64-apple-darwin
-          - platform: ubuntu-22.04
+          # 24.04: the ONNX Runtime behind semantic search needs glibc 2.38+.
+          - platform: ubuntu-24.04
             args: ""
           - platform: windows-latest
             args: ""
@@ -44,7 +45,7 @@ jobs:
         with:
           tauriScript: bun tauri
           tagName: v__VERSION__
-          releaseName: MyNote v__VERSION__
+          releaseName: Satchel v__VERSION__
           releaseBody: Download the installer for your platform below. macOS builds need Apple silicon and macOS 13.4 or later; see the README for first-launch steps.
           releaseDraft: true
           prerelease: false

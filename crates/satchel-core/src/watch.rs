@@ -24,7 +24,7 @@ pub struct VaultEvent {
 /// Keeps the watcher alive; dropping it stops watching.
 pub struct WatchGuard(#[allow(dead_code)] Debouncer<RecommendedWatcher, RecommendedCache>);
 
-const SKIP_DIRS: &[&str] = &[".mynote", ".git", ".obsidian", "node_modules", ".trash"];
+const SKIP_DIRS: &[&str] = &[".satchel", ".git", ".obsidian", "node_modules", ".trash"];
 
 fn is_relevant(rel: &str) -> bool {
     // Skip our index dir, VCS, dotdirs, and non-note files.
@@ -116,7 +116,7 @@ mod tests {
     fn ignores_index_and_dotfiles() {
         assert!(is_relevant("notes/a.md"));
         assert!(is_relevant("board.canvas"));
-        assert!(!is_relevant(".mynote/index.db"));
+        assert!(!is_relevant(".satchel/index.db"));
         assert!(!is_relevant(".obsidian/config"));
         assert!(!is_relevant("notes/.hidden.md"));
         assert!(!is_relevant("readme.txt"));

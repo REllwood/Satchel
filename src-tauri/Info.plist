@@ -3,16 +3,16 @@
 <plist version="1.0">
 <dict>
 	<key>NSDocumentsFolderUsageDescription</key>
-	<string>MyNote reads and saves your notes in the folder you chose.</string>
+	<string>Satchel reads and saves your notes in the folder you chose.</string>
 	<key>NSDesktopFolderUsageDescription</key>
-	<string>MyNote reads and saves your notes in the folder you chose.</string>
+	<string>Satchel reads and saves your notes in the folder you chose.</string>
 	<key>NSDownloadsFolderUsageDescription</key>
-	<string>MyNote reads and saves your notes in the folder you chose.</string>
+	<string>Satchel reads and saves your notes in the folder you chose.</string>
 	<key>NSFileProviderDomainUsageDescription</key>
-	<string>MyNote saves your notes in your Google Drive, Dropbox or OneDrive folder so that service can sync them.</string>
+	<string>Satchel saves your notes in your Google Drive, Dropbox or OneDrive folder so that service can sync them.</string>
 	<key>NSNetworkVolumesUsageDescription</key>
-	<string>MyNote reads and saves your notes in the folder you chose.</string>
+	<string>Satchel reads and saves your notes in the folder you chose.</string>
 	<key>NSRemovableVolumesUsageDescription</key>
-	<string>MyNote reads and saves your notes in the folder you chose.</string>
+	<string>Satchel reads and saves your notes in the folder you chose.</string>
 </dict>
 </plist>

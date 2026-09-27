@@ -68,30 +68,49 @@ function resolvedSet(notes: NoteMeta[]): Set<string> {
   return set;
 }
 
+/** Style `[[links]]`; off the cursor's line, hide the brackets (and an alias's
+ *  target) so only the label shows, as in a rendered note. */
 function decorations(view: EditorView, opts: WikilinkOptions): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
   const resolved = resolvedSet(opts.getNotes());
+  const { state } = view;
+  const active = new Set(
+    state.selection.ranges.flatMap((r) => {
+      const a = state.doc.lineAt(r.from).number;
+      const b = state.doc.lineAt(r.to).number;
+      return Array.from({ length: b - a + 1 }, (_, i) => a + i);
+    }),
+  );
+  // Visible ranges can split a line (e.g. around a hidden image embed), so
+  // remember the last line handled; the builder needs strictly sorted ranges.
+  let lastLine = 0;
   for (const { from, to } of view.visibleRanges) {
     let pos = from;
     while (pos <= to) {
-      const line = view.state.doc.lineAt(pos);
+      const line = state.doc.lineAt(pos);
+      pos = line.to + 1;
+      if (line.number <= lastLine) continue;
+      lastLine = line.number;
       WIKILINK_RE.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = WIKILINK_RE.exec(line.text))) {
         const start = line.from + m.index;
         const end = start + m[0].length;
-        const isResolved = resolved.has(targetOf(m[1]).toLowerCase());
-        builder.add(
-          start,
-          end,
-          Decoration.mark({
-            class: isResolved
-              ? "cm-wikilink"
-              : "cm-wikilink cm-wikilink-unresolved",
-          }),
-        );
+        const mark = Decoration.mark({
+          class: resolved.has(targetOf(m[1]).toLowerCase())
+            ? "cm-wikilink"
+            : "cm-wikilink cm-wikilink-unresolved",
+        });
+        if (active.has(line.number)) {
+          builder.add(start, end, mark);
+          continue;
+        }
+        const pipe = m[1].indexOf("|");
+        const labelFrom = start + 2 + (pipe >= 0 ? pipe + 1 : 0);
+        builder.add(start, labelFrom, Decoration.replace({}));
+        builder.add(labelFrom, end - 2, mark);
+        builder.add(end - 2, end, Decoration.replace({}));
       }
-      pos = line.to + 1;
     }
   }
   return builder.finish();
@@ -106,7 +125,7 @@ export function wikilinkExtension(opts: WikilinkOptions) {
         this.decorations = decorations(view, opts);
       }
       update(u: ViewUpdate) {
-        if (u.docChanged || u.viewportChanged) {
+        if (u.docChanged || u.viewportChanged || u.selectionSet) {
           this.decorations = decorations(u.view, opts);
         }
       }

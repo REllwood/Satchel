@@ -1,21 +1,32 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#6d67f5"/>
-      <stop offset="1" stop-color="#3f37c9"/>
+      <stop offset="0" stop-color="#716bf8"/>
+      <stop offset="1" stop-color="#3b32c2"/>
     </linearGradient>
-    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
+    <linearGradient id="flap" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#ffffff"/>
-      <stop offset="1" stop-color="#e9e8ff"/>
+      <stop offset="1" stop-color="#f1f0ff"/>
     </linearGradient>
   </defs>
   <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#bg)"/>
-  <!-- note page with folded corner -->
-  <path d="M332 262 H602 L712 372 V742 a30 30 0 0 1 -30 30 H332 a30 30 0 0 1 -30 -30 V292 a30 30 0 0 1 30 -30 Z" fill="url(#page)"/>
-  <path d="M602 262 V342 a30 30 0 0 0 30 30 H712 Z" fill="#c9c6ff"/>
-  <rect x="372" y="430" width="240" height="30" rx="15" fill="#5b54e8"/>
-  <rect x="372" y="510" width="270" height="26" rx="13" fill="#b9b6f5"/>
-  <rect x="372" y="580" width="210" height="26" rx="13" fill="#b9b6f5"/>
-  <!-- cloud badge -->
-  <path d="M636 800 h128 a58 58 0 0 0 6 -115.7 a84 84 0 0 0 -160 -18 a66 66 0 0 0 26 133.7 Z" fill="#ffffff" stroke="#3f37c9" stroke-width="22" stroke-linejoin="round"/>
+  <!-- a note tucked into the bag -->
+  <g transform="rotate(10 570 290)">
+    <rect x="496" y="190" width="150" height="176" rx="14" fill="#f6f5ff"/>
+    <rect x="522" y="222" width="96" height="14" rx="7" fill="#716bf8"/>
+    <rect x="522" y="250" width="70" height="12" rx="6" fill="#bcb8f7"/>
+  </g>
+  <!-- handle -->
+  <path d="M388 400 C388 250 636 250 636 400" fill="none" stroke="#ffffff" stroke-width="42" stroke-linecap="round"/>
+  <ellipse cx="512" cy="806" rx="250" ry="16" fill="#1d167a" opacity="0.28"/>
+  <!-- bag body -->
+  <rect x="236" y="384" width="552" height="416" rx="68" fill="#d7d4ff"/>
+  <!-- flap -->
+  <path d="M236 604 V452 A68 68 0 0 1 304 384 H720 A68 68 0 0 1 788 452 V604 A56 56 0 0 1 732 660 H292 A56 56 0 0 1 236 604 Z" fill="url(#flap)"/>
+  <path d="M276 622 H748" fill="none" stroke="#c9c5fb" stroke-width="7" stroke-linecap="round" stroke-dasharray="16 14"/>
+  <!-- buckle straps -->
+  <rect x="336" y="500" width="58" height="236" rx="14" fill="#3b32c2"/>
+  <rect x="630" y="500" width="58" height="236" rx="14" fill="#3b32c2"/>
+  <rect x="318" y="660" width="94" height="66" rx="16" fill="none" stroke="#231b8e" stroke-width="14"/>
+  <rect x="612" y="660" width="94" height="66" rx="16" fill="none" stroke="#231b8e" stroke-width="14"/>
 </svg>

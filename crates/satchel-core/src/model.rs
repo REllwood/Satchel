@@ -78,7 +78,7 @@ pub struct Attachment {
     pub mime: Option<String>,
 }
 
-/// Per-vault configuration, persisted in `.mynote/settings.json`.
+/// Per-vault configuration, persisted in `.satchel/settings.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct VaultConfig {

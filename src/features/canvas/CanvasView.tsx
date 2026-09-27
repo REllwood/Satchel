@@ -17,6 +17,7 @@ import { Plus } from "lucide-react";
 
 import * as api from "@/lib/api";
 import { useVault } from "@/features/vault/vault-store";
+import { useTheme } from "@/components/theme-provider";
 import {
   Dialog,
   DialogContent,
@@ -26,7 +27,7 @@ import {
 import { Button } from "@/components/ui/button";
 
 function labelFor(n: api.CanvasNode): string {
-  if (n.type === "file") return n.file ?? "(file)";
+  if (n.type === "file") return n.file?.split("/").pop()?.replace(/\.md$/i, "") ?? "(file)";
   if (n.type === "text") return n.text ?? "";
   if (n.type === "link") return n.url ?? "(link)";
   return n.label ?? "Group";
@@ -38,6 +39,7 @@ function toFlow(canvas: api.Canvas): { nodes: Node[]; edges: Edge[] } {
       id: n.id,
       position: { x: n.x, y: n.y },
       data: { label: labelFor(n), canvasNode: n },
+      className: `canvas-${n.type}`,
       style: { width: n.width, height: n.height },
     })),
     edges: canvas.edges.map((e) => ({
@@ -80,6 +82,7 @@ export function CanvasView({
   onOpenChange: (open: boolean) => void;
 }) {
   const { select } = useVault();
+  const { resolved } = useTheme();
   const [canvases, setCanvases] = useState<string[]>([]);
   const [path, setPath] = useState<string | null>(null);
   const [nodes, setNodes] = useState<Node[]>([]);
@@ -154,7 +157,7 @@ export function CanvasView({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[88vh] w-[92vw] max-w-[92vw] flex-col gap-0 p-0">
+      <DialogContent className="flex h-[88vh] w-[92vw] max-w-[92vw] flex-col gap-0 p-0 sm:max-w-[92vw]">
         <DialogHeader className="flex-row items-center gap-2 space-y-0 border-b px-4 py-2">
           <DialogTitle className="mr-2">Canvas</DialogTitle>
           <select
@@ -195,6 +198,7 @@ export function CanvasView({
                 }
               }}
               fitView
+              colorMode={resolved}
               proOptions={{ hideAttribution: true }}
             >
               <Background />

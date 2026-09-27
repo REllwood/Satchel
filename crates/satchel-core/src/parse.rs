@@ -25,7 +25,7 @@ static FENCED_CODE: LazyLock<Regex> =
 static INLINE_CODE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"`[^`\n]*`").unwrap());
 
-/// Render a Markdown body to HTML (GFM). Used by `mynote export --html`.
+/// Render a Markdown body to HTML (GFM). Used by `satchel export --html`.
 pub fn to_html(markdown: &str) -> String {
     use pulldown_cmark::{html, Options, Parser};
     let mut opts = Options::empty();

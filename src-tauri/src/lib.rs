@@ -1,4 +1,4 @@
-//! MyNote Tauri shell. Thin command layer over `mynote-core`; all real logic
+//! Satchel Tauri shell. Thin command layer over `satchel-core`; all real logic
 //! lives in the core. See `commands.rs` for the command surface.
 
 mod commands;
@@ -7,14 +7,14 @@ mod state;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use mynote_core::{embed, vault};
+use satchel_core::{embed, vault};
 use state::AppState;
 use tauri::Manager;
 
 /// Returns the core crate version (used by the status bar / health checks).
 #[tauri::command]
 fn core_version() -> String {
-    mynote_core::version().to_string()
+    satchel_core::version().to_string()
 }
 
 /// Locate the bundled embedding model: the app's resource dir in installed
@@ -28,7 +28,7 @@ fn resolve_model_dir(app: &tauri::AppHandle) -> PathBuf {
         .unwrap_or_else(embed::default_model_dir)
 }
 
-/// `MyNote mcp [--vault <folder>]`: serve MCP on stdio for Claude Code / Codex
+/// `Satchel mcp [--vault <folder>]`: serve MCP on stdio for Claude Code / Codex
 /// instead of opening a window. Returns the process exit code.
 pub fn run_mcp(args: &[OsString]) -> i32 {
     let mut vault_arg = None;
@@ -38,16 +38,16 @@ pub fn run_mcp(args: &[OsString]) -> i32 {
             vault_arg = it.next().map(PathBuf::from);
         }
     }
-    let Some(root) = vault_arg.or_else(|| std::env::var_os("MYNOTE_VAULT").map(PathBuf::from))
+    let Some(root) = vault_arg.or_else(|| std::env::var_os("SATCHEL_VAULT").map(PathBuf::from))
     else {
-        eprintln!("usage: MyNote mcp --vault <notes folder>");
+        eprintln!("usage: Satchel mcp --vault <notes folder>");
         return 2;
     };
     vault::allow_cloud_downloads();
-    match mynote_core::mcp::run(&root) {
+    match satchel_core::mcp::run(&root) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("mynote mcp: {e:#}");
+            eprintln!("satchel mcp: {e:#}");
             1
         }
     }

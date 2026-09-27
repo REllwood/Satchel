@@ -1,19 +1,19 @@
 [package]
-name = "mynote-cli"
+name = "satchel-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "MyNote command-line interface and MCP server"
+description = "Satchel command-line interface and MCP server"
 
 [[bin]]
-name = "mynote"
+name = "satchel"
 path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
 clap = { version = "4.6.1", features = ["derive"] }
-mynote-core = { workspace = true }
+satchel-core = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 

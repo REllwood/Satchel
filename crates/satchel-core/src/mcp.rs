@@ -1,7 +1,7 @@
 //! Minimal MCP server over stdio. MCP is newline-delimited JSON-RPC 2.0, so we
 //! implement it directly (no async runtime / SDK) and expose note tools over a
-//! vault. Served by both the `mynote` CLI and the desktop app (`MyNote mcp`),
-//! e.g. `claude mcp add --transport stdio mynote -- <app> mcp --vault <folder>`.
+//! vault. Served by both the `satchel` CLI and the desktop app (`Satchel mcp`),
+//! e.g. `claude mcp add --transport stdio satchel -- <app> mcp --vault <folder>`.
 
 use std::io::{self, BufRead, Write};
 use std::path::Path;
@@ -48,7 +48,7 @@ pub fn run(root: &Path) -> Result<()> {
                 ok(&id, json!({
                     "protocolVersion": pv,
                     "capabilities": { "tools": {} },
-                    "serverInfo": { "name": "mynote", "version": env!("CARGO_PKG_VERSION") }
+                    "serverInfo": { "name": "satchel", "version": env!("CARGO_PKG_VERSION") }
                 }))
             }
             "ping" => ok(&id, json!({})),
@@ -132,7 +132,10 @@ fn call_tool(
     }
     match name {
         "search_notes" => {
-            let hits = search::fts::search_fulltext(conn, str_arg(args, "query")?, limit_arg(args))?;
+            let hits: Vec<_> = search::fts::search_fulltext(conn, str_arg(args, "query")?, limit_arg(args))?
+                .into_iter()
+                .map(search::SearchHit::with_bracket_marks)
+                .collect();
             Ok(serde_json::to_string_pretty(&hits)?)
         }
         "semantic_search" => {
@@ -142,7 +145,10 @@ fn call_tool(
             let emb = embedder.as_ref().unwrap();
             // Embed notes added or edited since the last search.
             semantic::embed_pending(conn, emb)?;
-            let hits = semantic::search_semantic(conn, emb, str_arg(args, "query")?, limit_arg(args))?;
+            let hits: Vec<_> = semantic::search_semantic(conn, emb, str_arg(args, "query")?, limit_arg(args))?
+                .into_iter()
+                .map(search::SearchHit::with_bracket_marks)
+                .collect();
             Ok(serde_json::to_string_pretty(&hits)?)
         }
         "list_notes" => {

@@ -1,10 +1,10 @@
 [package]
-name = "mynote-core"
+name = "satchel-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "MyNote core: vault I/O, parsing, indexing, search, embeddings"
+description = "Satchel core: vault I/O, parsing, indexing, search, embeddings"
 
 [dependencies]
 serde = { workspace = true }

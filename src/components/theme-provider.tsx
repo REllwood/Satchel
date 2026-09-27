@@ -16,7 +16,7 @@ type ThemeContextValue = {
 };
 
 const ThemeProviderContext = createContext<ThemeContextValue | null>(null);
-const STORAGE_KEY = "mynote-theme";
+const STORAGE_KEY = "satchel-theme";
 
 function systemPrefersDark(): boolean {
   return (

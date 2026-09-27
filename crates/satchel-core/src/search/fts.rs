@@ -38,7 +38,7 @@ pub fn search_fulltext(conn: &Connection, query: &str, limit: usize) -> Result<V
 
     let mut stmt = conn.prepare(
         "SELECT n.id, n.rel_path, n.title,
-                snippet(note_fts, 1, '[', ']', '…', 12) AS snip,
+                snippet(note_fts, 1, char(2), char(3), '…', 12) AS snip,
                 bm25(note_fts) AS rank
          FROM note_fts
          JOIN notes n ON n.id = note_fts.rowid
@@ -94,7 +94,8 @@ mod tests {
         let hits = search_fulltext(&conn, "quick", 10).unwrap();
         assert!(!hits.is_empty());
         assert_eq!(hits[0].rel_path, "fox.md");
-        assert!(hits[0].snippet.contains('['), "snippet has match markers");
+        assert!(hits[0].snippet.contains(super::super::MARK_START), "snippet has match markers");
+        assert!(hits[0].clone().with_bracket_marks().snippet.contains("[quick]"));
     }
 
     #[test]

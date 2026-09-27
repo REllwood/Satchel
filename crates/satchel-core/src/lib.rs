@@ -1,9 +1,9 @@
-//! # mynote-core
+//! # satchel-core
 //!
-//! The shared core of MyNote. Files (Markdown + attachments in a user-chosen vault) are the
+//! The shared core of Satchel. Files (Markdown + attachments in a user-chosen vault) are the
 //! source of truth; a local SQLite database is a *derived, rebuildable index*. This crate holds
 //! all logic — vault I/O, parsing, indexing, search (full-text + semantic), and the read-only
-//! query service — and is consumed by three thin shells: the Tauri desktop app, the `mynote`
+//! query service — and is consumed by three thin shells: the Tauri desktop app, the `satchel`
 //! CLI, and the MCP server.
 //!
 //! Modules are added phase by phase (see `.forge/PLAN.md`).
@@ -57,7 +57,7 @@ mod flow {
         fs::write(root.join("welcome.md"), "# Welcome\n\nhello there [[Ideas]]").unwrap();
         fs::write(root.join("Ideas.md"), "# Ideas\n\nbrainstorm").unwrap();
 
-        let db_path = root.join(".mynote/index.db");
+        let db_path = root.join(".satchel/index.db");
         let conn = db::open(&db_path).unwrap();
 
         // open_vault: reindex + list

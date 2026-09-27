@@ -1,5 +1,5 @@
 {
-  "name": "mynote",
+  "name": "satchel",
   "private": true,
   "version": "0.1.0",
   "description": "Local-first notes that sync through your own iCloud Drive or Google Drive folder.",

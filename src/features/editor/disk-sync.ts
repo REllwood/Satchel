@@ -1,5 +1,13 @@
+import { toLF } from "./eol";
+
 /** What the editor should do about the open note changing on disk. */
 export type DiskChange = "ignore" | "reload" | "conflict";
+
+/** One entry of a `vault-changed` event from the file watcher. */
+export interface VaultChange {
+  rel_path: string;
+  removed: boolean;
+}
 
 /**
  * Tells the editor's own saves apart from edits made elsewhere (another
@@ -26,6 +34,17 @@ export class DiskSync {
     if (path === this.path) this.inFlight.push(text);
   }
 
+  /** The open note moved from `from` to `to` on disk, with the same text. */
+  moved(from: string, to: string): void {
+    if (from === this.path) this.path = to;
+  }
+
+  /** Texts `path` may hold on disk: the last one seen plus saves in flight. */
+  known(path: string): string[] {
+    if (path !== this.path) return [];
+    return this.onDisk === null ? [...this.inFlight] : [this.onDisk, ...this.inFlight];
+  }
+
   /** A save sent with `saving` finished, successfully or not. */
   saved(path: string, text: string, ok: boolean): void {
     if (path !== this.path) return;
@@ -45,4 +64,52 @@ export class DiskSync {
     if (disk === editor) return "ignore";
     return dirty ? "conflict" : "reload";
   }
+}
+
+const fileName = (relPath: string) => (relPath.split("/").pop() ?? relPath).toLowerCase();
+
+/**
+ * Notes added in the same batch that removed `path`, in the order to check
+ * them for a move. A moved note usually keeps its name, and a folder move
+ * reports every note in the folder, so notes with the same name come first.
+ */
+export function moveCandidates(path: string, changes: VaultChange[]): string[] {
+  const name = fileName(path);
+  const added = changes
+    .filter((c) => !c.removed && c.rel_path !== path && /\.md$/i.test(c.rel_path))
+    .map((c) => c.rel_path);
+  return [
+    ...added.filter((p) => fileName(p) === name),
+    ...added.filter((p) => fileName(p) !== name),
+  ];
+}
+
+/**
+ * Where the open note `path` went when it was removed on disk: the first note
+ * added in the same batch that holds a text it is known to have (the text last
+ * seen on disk, a save in flight, or what the editor shows). Null when nothing
+ * matches, which means the note was deleted. Line endings do not matter.
+ */
+export async function findMovedNote(
+  path: string,
+  changes: VaultChange[],
+  known: string[],
+  read: (relPath: string) => Promise<string>,
+  limit = 25,
+): Promise<string | null> {
+  const texts = new Set(known.map(toLF));
+  if (texts.size === 0) return null;
+  for (const candidate of moveCandidates(path, changes).slice(0, limit)) {
+    try {
+      if (texts.has(toLF(await read(candidate)))) return candidate;
+    } catch {
+      /* gone again, or unreadable: not this one */
+    }
+  }
+  return null;
+}
+
+/** A sibling path for unsaved edits to a note that was deleted on disk. */
+export function recoveryPath(path: string, stamp: number): string {
+  return `${path.replace(/\.md$/i, "")}.recovered-${stamp}.md`;
 }

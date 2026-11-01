@@ -118,7 +118,8 @@ pub fn embed_all(conn: &Connection, embedder: &Embedder) -> Result<usize> {
 pub fn pending_notes(conn: &Connection) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare(
         "SELECT n.id FROM notes n
-         WHERE n.materialized = 1 AND trim(n.body) != ''
+         WHERE n.materialized = 1
+           AND trim(n.body, ' ' || char(9) || char(10) || char(13)) != ''
            AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.note_id = n.id)
          ORDER BY n.mtime DESC",
     )?;
@@ -155,7 +156,18 @@ pub fn search_semantic(
         return Ok(Vec::new());
     }
     let qvec = embedder.embed_one(query)?;
-    let k = (limit * 4).max(10) as i64;
+    search_semantic_vec(conn, &qvec, limit)
+}
+
+/// Most results any search returns. sqlite-vec caps a KNN query at 4096 rows,
+/// and each note can match through several chunks.
+pub const MAX_LIMIT: usize = 1000;
+
+/// [`search_semantic`] with the query already embedded, so a caller can run
+/// the model without holding its database lock.
+pub fn search_semantic_vec(conn: &Connection, qvec: &[f32], limit: usize) -> Result<Vec<SearchHit>> {
+    let limit = limit.clamp(1, MAX_LIMIT);
+    let k = (limit.saturating_mul(4)).clamp(10, 4096) as i64;
 
     let mut stmt = conn.prepare(
         "WITH knn AS (
@@ -169,7 +181,7 @@ pub fn search_semantic(
 
     // Best (min-distance) chunk per note.
     let mut best: HashMap<i64, (f64, String)> = HashMap::new();
-    let rows = stmt.query_map(params![vec::f32_blob(&qvec), k], |r| {
+    let rows = stmt.query_map(params![vec::f32_blob(qvec), k], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?, r.get::<_, String>(2)?))
     })?;
     for row in rows {
@@ -219,10 +231,20 @@ pub fn search_hybrid(
     query: &str,
     limit: usize,
 ) -> Result<Vec<SearchHit>> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let qvec = embedder.embed_one(query)?;
+    search_hybrid_vec(conn, query, &qvec, limit)
+}
+
+/// [`search_hybrid`] with the query already embedded.
+pub fn search_hybrid_vec(conn: &Connection, query: &str, qvec: &[f32], limit: usize) -> Result<Vec<SearchHit>> {
     const RRF_K: f64 = 60.0;
-    let pool = (limit * 3).max(limit);
+    let limit = limit.clamp(1, MAX_LIMIT);
+    let pool = limit.saturating_mul(3).min(MAX_LIMIT);
     let fts_hits = fts::search_fulltext(conn, query, pool)?;
-    let sem_hits = search_semantic(conn, embedder, query, pool)?;
+    let sem_hits = search_semantic_vec(conn, qvec, pool)?;
 
     // note_id -> (rrf score, representative hit)
     let mut merged: HashMap<i64, (f64, SearchHit)> = HashMap::new();

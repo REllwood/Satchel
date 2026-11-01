@@ -32,19 +32,26 @@ export function SearchDialog({
   const [mode, setMode] = useState<Mode>("fulltext");
   const [hits, setHits] = useState<api.SearchHit[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (open) {
       setQuery("");
       setHits([]);
+      setError(null);
     }
   }, [open]);
 
   useEffect(() => {
+    // Clearing the query or closing the dialog drops a search in progress, so
+    // it must also end the "searching…" state that search started.
     if (!open || !query.trim()) {
       setHits([]);
+      setLoading(false);
+      setError(null);
       return;
     }
+    // `cancelled` keeps an older, slower search from replacing newer results.
     let cancelled = false;
     setLoading(true);
     const timer = setTimeout(async () => {
@@ -56,9 +63,16 @@ export function SearchDialog({
               ? api.searchHybrid
               : api.searchFulltext;
         const results = await fn(query, 30);
-        if (!cancelled) setHits(results);
-      } catch {
-        if (!cancelled) setHits([]);
+        if (!cancelled) {
+          setHits(results);
+          setError(null);
+        }
+      } catch (e) {
+        // A failed search (semantic search not ready, say) is not "no matches".
+        if (!cancelled) {
+          setHits([]);
+          setError(String(e));
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -105,7 +119,12 @@ export function SearchDialog({
         {loading && hits.length === 0 && (
           <div className="px-3 py-3 text-sm text-muted-foreground">searching…</div>
         )}
-        {!loading && query.trim() !== "" && hits.length === 0 && (
+        {!loading && error && (
+          <div role="alert" className="px-3 py-3 text-sm text-destructive">
+            Search failed: {error}
+          </div>
+        )}
+        {!loading && !error && query.trim() !== "" && hits.length === 0 && (
           <CommandEmpty>No matches.</CommandEmpty>
         )}
         {hits.map((hit) => (

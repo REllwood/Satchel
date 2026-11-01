@@ -17,8 +17,10 @@ describe("api", () => {
       invoke.mockClear();
       await (call as (...args: unknown[]) => Promise<unknown>)("a.md", "b", 1);
       expect(invoke, name).toHaveBeenCalledTimes(1);
-      const args = (invoke.mock.calls[0][1] ?? {}) as Record<string, unknown>;
-      for (const key of Object.keys(args)) {
+      const args = invoke.mock.calls[0][1];
+      // A raw payload (attachment bytes) has no argument names.
+      if (!args || typeof args !== "object" || ArrayBuffer.isView(args)) continue;
+      for (const key of Object.keys(args as object)) {
         expect(key, `${name} sends "${key}"`).toMatch(/^[a-z][A-Za-z0-9]*$/);
       }
     }

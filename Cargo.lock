@@ -4134,6 +4134,7 @@ dependencies = [
 name = "satchel-app"
 version = "0.1.0"
 dependencies = [
+ "same-file",
  "satchel-core",
  "serde",
  "serde_json",
@@ -4164,6 +4165,8 @@ dependencies = [
  "blake3",
  "dirs 7.0.0",
  "fastembed",
+ "icu_normalizer",
+ "libc",
  "notify",
  "notify-debouncer-full",
  "pulldown-cmark",

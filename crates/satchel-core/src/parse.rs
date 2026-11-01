@@ -11,19 +11,14 @@ use serde_json::Value;
 
 use crate::model::{Heading, Link, LinkKind, ParsedNote};
 
-static WIKILINK: LazyLock<Regex> =
+pub(crate) static WIKILINK: LazyLock<Regex> =
     // optional leading `!` (embed) + [[ inner ]]
     LazyLock::new(|| Regex::new(r"(!?)\[\[([^\[\]\n]+)\]\]").unwrap());
 
 static TAG: LazyLock<Regex> =
-    // `#tag`, must follow start/space/paren, start with a letter, allow nesting a/b
-    LazyLock::new(|| Regex::new(r"(?:^|[\s(])#(\p{L}[\p{L}\p{N}_/-]*)").unwrap());
-
-static FENCED_CODE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?s)```.*?```|~~~.*?~~~").unwrap());
-
-static INLINE_CODE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"`[^`\n]*`").unwrap());
+    // `#tag`, must follow start or whitespace (so `(#anchor)` links are not
+    // tags), start with a letter, allow nesting a/b
+    LazyLock::new(|| Regex::new(r"(?:^|\s)#(\p{L}[\p{L}\p{N}_/-]*)").unwrap());
 
 /// Render a Markdown body to HTML (GFM). Used by `satchel export --html`.
 pub fn to_html(markdown: &str) -> String {
@@ -65,8 +60,10 @@ pub fn parse(content: &str) -> ParsedNote {
 }
 
 /// Split a leading `---` … `---` YAML frontmatter block from the body.
-/// Returns `(Value::Null, whole)` when there is no valid frontmatter.
-fn split_frontmatter(content: &str) -> (Value, String) {
+/// Returns `(Value::Null, whole)` when there is no valid frontmatter: a block
+/// that is not a YAML mapping (a slide divider, or YAML with a mistake in it)
+/// stays part of the body so its text is still indexed.
+pub(crate) fn split_frontmatter(content: &str) -> (Value, String) {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let after_open = match content
         .strip_prefix("---\r\n")
@@ -82,9 +79,11 @@ fn split_frontmatter(content: &str) -> (Value, String) {
         if trimmed == "---" || trimmed == "..." {
             let yaml = &after_open[..offset];
             let body = &after_open[offset + line.len()..];
-            let fm = serde_yaml_ng::from_str::<Value>(yaml).unwrap_or(Value::Null);
-            let fm = if fm.is_object() { fm } else { Value::Null };
-            return (fm, body.to_string());
+            return match serde_yaml_ng::from_str::<Value>(yaml) {
+                Ok(fm) if fm.is_object() => (fm, body.to_string()),
+                Ok(Value::Null) if yaml.trim().is_empty() => (Value::Null, body.to_string()),
+                _ => (Value::Null, content.to_string()),
+            };
         }
         offset += line.len();
     }
@@ -150,10 +149,53 @@ fn walk_body(body: &str) -> (Vec<Heading>, String) {
     (headings, normalize_ws(&plaintext))
 }
 
-/// Remove fenced and inline code so wikilinks/tags inside code aren't picked up.
+/// Byte ranges of `body` that are code or raw HTML (including comments), as
+/// the Markdown parser sees them, so links and tags inside them are ignored.
+pub(crate) fn code_ranges(body: &str) -> Vec<std::ops::Range<usize>> {
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_TABLES);
+    opts.insert(Options::ENABLE_FOOTNOTES);
+    let mut ranges = Vec::new();
+    for (event, range) in Parser::new_ext(body, opts).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(_) | Tag::HtmlBlock) | Event::Code(_) | Event::InlineHtml(_) => {
+                ranges.push(range)
+            }
+            Event::Html(_) => ranges.push(range),
+            _ => {}
+        }
+    }
+    ranges
+}
+
+/// Blank out code and HTML (keeping byte offsets) so wikilinks and tags
+/// inside them are not picked up.
 fn strip_code(body: &str) -> String {
-    let no_fenced = FENCED_CODE.replace_all(body, " ");
-    INLINE_CODE.replace_all(&no_fenced, " ").into_owned()
+    let mut out = body.as_bytes().to_vec();
+    for range in code_ranges(body) {
+        for byte in &mut out[range] {
+            // Keep line breaks so tag positions (start of line) still work.
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+    // Whole multi-byte characters are blanked, so this is still valid UTF-8.
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// Split the inside of a `[[...]]` into (target, heading, alias). In a table
+/// cell the alias separator is written `\|`.
+pub(crate) fn split_wikilink(inner: &str) -> (String, Option<String>, Option<String>) {
+    let (left, alias) = match inner.split_once("\\|").or_else(|| inner.split_once('|')) {
+        Some((l, a)) => (l, Some(a.trim().to_string())),
+        None => (inner, None),
+    };
+    let (target, heading) = match left.split_once('#') {
+        Some((t, h)) => (t.trim().to_string(), Some(h.trim().to_string())),
+        None => (left.trim().to_string(), None),
+    };
+    (target, heading, alias)
 }
 
 fn extract_links(scannable: &str) -> Vec<Link> {
@@ -164,16 +206,9 @@ fn extract_links(scannable: &str) -> Vec<Link> {
         } else {
             LinkKind::Wikilink
         };
-        let inner = &cap[2];
-        let (left, alias) = match inner.split_once('|') {
-            Some((l, a)) => (l, Some(a.trim().to_string())),
-            None => (inner, None),
-        };
-        let (target, heading) = match left.split_once('#') {
-            Some((t, h)) => (t.trim().to_string(), Some(h.trim().to_string())),
-            None => (left.trim().to_string(), None),
-        };
-        if target.is_empty() && heading.is_none() {
+        let (target, heading, alias) = split_wikilink(&cap[2]);
+        // `[[#Heading]]` points inside this same note, not at another note.
+        if target.is_empty() {
             continue;
         }
         let link = Link {
@@ -312,6 +347,36 @@ mod tests {
         assert!(!p.plaintext.contains('['));
         assert!(p.plaintext.contains("bold"));
         assert!(p.plaintext.contains("Title"));
+    }
+
+    #[test]
+    fn a_dash_block_that_is_not_yaml_stays_in_the_body() {
+        let slides = parse("---\n# Slide one\n\nIntro about [[Roadmap]] #planning\n\n---\n\n# Slide two");
+        assert!(slides.plaintext.contains("Intro"));
+        assert_eq!(slides.links.len(), 1);
+        assert_eq!(slides.tags, vec!["planning".to_string()]);
+        assert_eq!(slides.title, "Slide one");
+
+        let broken = parse("---\ntitle: Re: budget review\n---\n# Budget\n");
+        assert!(broken.plaintext.contains("budget review"), "{}", broken.plaintext);
+        assert_eq!(broken.title, "Budget");
+    }
+
+    #[test]
+    fn ignores_links_and_tags_in_all_kinds_of_code_and_comments() {
+        let text = "````md\n```\n[[a]] #a\n```\n````\n\n    [[b]] #b\n\n`` [[c]] #c ``\n\n<!-- [[d]] #d -->\n\n[part two](#section-two) [[real]] #real\n";
+        let note = parse(text);
+        let targets: Vec<&str> = note.links.iter().map(|l| l.target.as_str()).collect();
+        assert_eq!(targets, vec!["real"]);
+        assert_eq!(note.tags, vec!["real".to_string()]);
+    }
+
+    #[test]
+    fn escaped_pipe_and_same_note_links() {
+        let note = parse("| [[Target Note\\|shown]] |\n\n[[#Heading]]");
+        assert_eq!(note.links.len(), 1);
+        assert_eq!(note.links[0].target, "Target Note");
+        assert_eq!(note.links[0].alias.as_deref(), Some("shown"));
     }
 
     #[test]

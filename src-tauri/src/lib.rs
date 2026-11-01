@@ -38,6 +38,10 @@ pub fn run_mcp(args: &[OsString]) -> i32 {
     while let Some(arg) = it.next() {
         if arg == "--vault" {
             vault_arg = it.next().map(PathBuf::from);
+        } else if let Some(path) = arg.to_str().and_then(|a| a.strip_prefix("--vault=")) {
+            vault_arg = Some(PathBuf::from(path));
+        } else {
+            eprintln!("satchel mcp: ignoring unknown argument {}", arg.to_string_lossy());
         }
     }
     let Some(root) = vault_arg.or_else(|| std::env::var_os("SATCHEL_VAULT").map(PathBuf::from))
@@ -45,6 +49,10 @@ pub fn run_mcp(args: &[OsString]) -> i32 {
         eprintln!("usage: Satchel mcp --vault <notes folder>");
         return 2;
     };
+    if !root.is_dir() {
+        eprintln!("satchel mcp: notes folder not found: {}", root.display());
+        return 2;
+    }
     vault::allow_cloud_downloads();
     match satchel_core::mcp::run(&root) {
         Ok(()) => 0,
@@ -55,11 +63,86 @@ pub fn run_mcp(args: &[OsString]) -> i32 {
     }
 }
 
+/// The macOS menu bar: the standard items, except that Quit (⌘Q) goes
+/// through `request_exit`, so unsaved edits are saved first. The standard Quit
+/// item ends the app at once, with no chance to save.
+#[cfg(target_os = "macos")]
+fn app_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
+    use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+    let sep = || PredefinedMenuItem::separator(app);
+    let quit = MenuItem::with_id(app, QUIT_MENU_ID, "Quit Satchel", true, Some("CmdOrCtrl+Q"))?;
+    let app_menu = Submenu::with_items(
+        app,
+        "Satchel",
+        true,
+        &[
+            &PredefinedMenuItem::about(app, None, Some(AboutMetadata::default()))?,
+            &sep()?,
+            &PredefinedMenuItem::services(app, None)?,
+            &sep()?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::show_all(app, None)?,
+            &sep()?,
+            &quit,
+        ],
+    )?;
+    let file = Submenu::with_items(app, "File", true, &[&PredefinedMenuItem::close_window(app, None)?])?;
+    let edit = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &sep()?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+    let view = Submenu::with_items(app, "View", true, &[&PredefinedMenuItem::fullscreen(app, None)?])?;
+    let window = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, None)?,
+            &sep()?,
+            &PredefinedMenuItem::close_window(app, None)?,
+        ],
+    )?;
+    Menu::with_items(app, &[&app_menu, &file, &edit, &view, &window])
+}
+
+#[cfg(target_os = "macos")]
+const QUIT_MENU_ID: &str = "quit";
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     vault::allow_cloud_downloads();
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(app_menu).on_menu_event(|app, event| {
+        if event.id() == QUIT_MENU_ID {
+            commands::request_exit(app);
+        }
+    });
+    builder
         .plugin(tauri_plugin_dialog::init())
+        // Closing the window quits the app. Give it a moment to save unsaved
+        // edits first.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let exiting = window.state::<AppState>().exiting.load(std::sync::atomic::Ordering::SeqCst);
+                if !exiting {
+                    api.prevent_close();
+                    commands::request_exit(window.app_handle());
+                }
+            }
+        })
         .setup(|app| {
             let model_dir = resolve_model_dir(app.handle());
             app.manage(AppState::new(model_dir));
@@ -101,6 +184,7 @@ pub fn run() {
             commands::get_graph,
             commands::get_tags,
             commands::notes_for_tag,
+            commands::confirm_exit,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

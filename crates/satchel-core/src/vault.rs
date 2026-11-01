@@ -49,22 +49,171 @@ pub fn write_note_atomic(path: &Path, content: &str) -> io::Result<()> {
 }
 
 /// Write arbitrary bytes atomically (temp file in the same directory + rename).
+///
+/// The data is flushed to disk before the rename, so a crash leaves either the
+/// old or the new contents, never an empty file. The file keeps its
+/// permissions and Finder tags, and a symlinked note is written through to the
+/// file it points at instead of being replaced by a plain file.
 pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let target = match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+        }
+        _ => path.to_path_buf(),
+    };
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".satchel-tmp-")
-        .tempfile_in(parent)?;
+    let existing = fs::metadata(&target).ok();
+    let mut tmp = temp_file_like(parent, existing.as_ref())?;
     tmp.write_all(bytes)?;
-    tmp.flush()?;
-    tmp.persist(path).map_err(|e| e.error)?;
+    tmp.as_file().sync_all()?;
+    #[cfg(target_os = "macos")]
+    if existing.is_some() {
+        copy_finder_metadata(&target, tmp.path());
+    }
+    tmp.persist(&target).map_err(|e| e.error)?;
+    sync_dir(parent);
     Ok(())
 }
 
-/// Join a vault-relative path to the root, rejecting absolute paths and any
-/// `..` traversal so a path can never escape the vault. Used wherever an
-/// untrusted (UI/CLI/MCP) relative path is resolved.
+/// Create a new file with `bytes`, failing with `AlreadyExists` instead of
+/// replacing a file that is already there (even one created a moment ago).
+pub fn create_file_exclusive(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut tmp = temp_file_like(parent, None)?;
+    tmp.write_all(bytes)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist_noclobber(path).map_err(|e| e.error)?;
+    sync_dir(parent);
+    Ok(())
+}
+
+/// A temp file in `dir` with the permissions of `like` (the file it will
+/// replace), or the usual `rw-r--r--` for a new file rather than tempfile's
+/// private default, which would hide notes from other accounts and tools.
+fn temp_file_like(dir: &Path, like: Option<&fs::Metadata>) -> io::Result<tempfile::NamedTempFile> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".satchel-tmp-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = like.map(|m| m.permissions().mode() & 0o7777).unwrap_or(0o644);
+        builder.permissions(fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    let _ = like;
+    builder.tempfile_in(dir)
+}
+
+/// Flush a directory entry change (the rename) to disk. Best effort.
+fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(d) = fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
+
+/// Copy Finder tags and colour labels from `from` to `to`. Best effort.
+#[cfg(target_os = "macos")]
+fn copy_finder_metadata(from: &Path, to: &Path) {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let (Ok(from), Ok(to)) = (
+        CString::new(from.as_os_str().as_bytes()),
+        CString::new(to.as_os_str().as_bytes()),
+    ) else {
+        return;
+    };
+    for name in ["com.apple.metadata:_kMDItemUserTags", "com.apple.FinderInfo"] {
+        let name = CString::new(name).unwrap();
+        let mut buf = vec![0u8; 4096];
+        // SAFETY: valid NUL-terminated paths and names, and a buffer of the
+        // stated length. A missing attribute just returns -1.
+        unsafe {
+            let len = libc::getxattr(
+                from.as_ptr(),
+                name.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                0,
+                0,
+            );
+            if len > 0 {
+                libc::setxattr(to.as_ptr(), name.as_ptr(), buf.as_ptr().cast(), len as usize, 0, 0);
+            }
+        }
+    }
+}
+
+/// A file name for a note titled `title`: characters that are not allowed in
+/// file names on macOS, Windows or Linux become `-`, and leading dots (which
+/// would hide the note) and trailing dots and spaces (which Windows drops)
+/// are removed. Never empty.
+pub fn note_file_name(title: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+    let trimmed = cleaned
+        .trim()
+        .trim_start_matches('.')
+        .trim_end_matches(['.', ' '])
+        .trim();
+    let stem = if trimmed.is_empty() { "Untitled" } else { trimmed };
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if RESERVED.iter().any(|r| r.eq_ignore_ascii_case(stem)) {
+        format!("{stem} note")
+    } else {
+        stem.to_string()
+    }
+}
+
+/// Join a vault-relative path to the root, rejecting absolute paths, any
+/// `..` traversal, and symlinks that lead outside the vault, so a path can
+/// never escape it. Used wherever an untrusted (UI/CLI/MCP) relative path is
+/// resolved.
 pub fn safe_join(root: &Path, rel: &str) -> io::Result<PathBuf> {
+    let joined = join_lexically(root, rel)?;
+    ensure_inside(root, &joined)?;
+    Ok(joined)
+}
+
+/// Check that `path`, with symlinks resolved, is inside `root`. Parts of the
+/// path that do not exist yet cannot be links, so the deepest existing
+/// ancestor is what gets checked.
+fn ensure_inside(root: &Path, path: &Path) -> io::Result<()> {
+    let Ok(real_root) = root.canonicalize() else {
+        return Ok(()); // no vault folder, so nothing under it exists either
+    };
+    let mut probe = path;
+    loop {
+        if let Ok(real) = probe.canonicalize() {
+            if real.starts_with(&real_root) {
+                return Ok(());
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "path leads outside the vault",
+            ));
+        }
+        match probe.parent() {
+            Some(parent) if parent.starts_with(root) => probe = parent,
+            _ => return Ok(()),
+        }
+    }
+}
+
+fn join_lexically(root: &Path, rel: &str) -> io::Result<PathBuf> {
     let rel_path = Path::new(rel);
     if rel_path.is_absolute() {
         return Err(io::Error::new(
@@ -159,17 +308,168 @@ pub fn allow_cloud_downloads() {
     }
 }
 
+/// True when `rel` is inside a folder the scanner skips (config, VCS, any dot
+/// folder) or is itself a dotfile, so it is never treated as a note.
+pub fn is_hidden_path(rel: &str) -> bool {
+    rel.split('/')
+        .any(|part| SKIP_DIRS.contains(&part) || part.starts_with('.'))
+}
+
+/// The macOS 13 iCloud placeholder (`.<name>.icloud`) standing in for `abs`,
+/// if there is one. Newer macOS versions keep the real name instead.
+pub fn icloud_placeholder(abs: &Path) -> Option<PathBuf> {
+    let name = abs.file_name()?.to_str()?;
+    let placeholder = abs.with_file_name(format!(".{name}.icloud"));
+    placeholder.is_file().then_some(placeholder)
+}
+
+/// Make sure `abs` has its contents locally. A macOS 13 iCloud placeholder is
+/// downloaded (which can take a while), waiting up to `timeout`. On newer
+/// systems, reading a cloud-only file downloads it, so there is nothing to do.
+pub fn ensure_local(abs: &Path, timeout: std::time::Duration) -> io::Result<()> {
+    if abs.exists() || icloud_placeholder(abs).is_none() {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("/usr/bin/brctl")
+            .arg("download")
+            .arg(abs)
+            .status()?;
+        if !status.success() {
+            return Err(io::Error::other("iCloud Drive could not download the note"));
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if abs.is_file() {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "still downloading from iCloud Drive, try again in a moment",
+        ))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = timeout;
+        Ok(())
+    }
+}
+
+/// True when `abs` exists under exactly this name. On case-insensitive disks
+/// `Notes.md` also opens `notes.md`, so after a case-only or Unicode-form
+/// rename the old spelling still "exists" and must be checked against the
+/// folder listing.
+pub fn exists_exactly(abs: &Path) -> bool {
+    if !abs.is_file() {
+        return false;
+    }
+    if cfg!(not(any(target_os = "macos", windows))) {
+        return true;
+    }
+    let (Some(parent), Some(name)) = (abs.parent(), abs.file_name()) else {
+        return true;
+    };
+    match fs::read_dir(parent) {
+        Ok(entries) => entries.flatten().any(|e| e.file_name() == name),
+        Err(_) => true,
+    }
+}
+
+/// Find the file an embed or link in `from_note` points at, the way Obsidian
+/// does: next to the note first, then from the vault root, then (for a bare
+/// file name) anywhere in the vault, preferring the shortest path.
+pub fn resolve_attachment(root: &Path, from_note: Option<&str>, target: &str) -> io::Result<PathBuf> {
+    let target = target.trim().trim_start_matches('/');
+    let not_found = || io::Error::new(io::ErrorKind::NotFound, format!("{target} was not found"));
+    if target.is_empty() {
+        return Err(not_found());
+    }
+    let mut candidates = Vec::new();
+    if let Some(dir) = from_note.and_then(|n| n.rsplit_once('/')).map(|(dir, _)| dir) {
+        if let Some(rel) = normalize_rel(&format!("{dir}/{target}")) {
+            candidates.push(rel);
+        }
+    }
+    if let Some(rel) = normalize_rel(target) {
+        candidates.push(rel);
+    }
+    for rel in candidates {
+        if let Ok(abs) = safe_join(root, &rel) {
+            if abs.is_file() {
+                return Ok(abs);
+            }
+        }
+    }
+    if target.contains('/') {
+        return Err(not_found());
+    }
+    let mut best: Option<PathBuf> = None;
+    let walker = WalkDir::new(root).follow_links(false).into_iter();
+    for entry in walker.filter_entry(|e| {
+        e.depth() == 0 || !(e.file_type().is_dir() && is_hidden_path(&e.file_name().to_string_lossy()))
+    }) {
+        let Ok(entry) = entry else { continue };
+        if entry.file_type().is_file() && entry.file_name().to_string_lossy() == target {
+            let shorter = best
+                .as_ref()
+                .is_none_or(|b| entry.path().as_os_str().len() < b.as_os_str().len());
+            if shorter {
+                best = Some(entry.into_path());
+            }
+        }
+    }
+    best.ok_or_else(not_found)
+}
+
+/// Resolve `.` and `..` in a vault-relative path. `None` if it climbs above
+/// the vault root.
+fn normalize_rel(rel: &str) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in rel.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            p => parts.push(p),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
 fn rel_path_str(root: &Path, abs: &Path) -> Option<String> {
     let rel = abs.strip_prefix(root).ok()?;
     Some(rel.to_string_lossy().replace('\\', "/"))
+}
+
+/// The result of a full vault scan.
+#[derive(Debug, Default)]
+pub struct VaultScan {
+    pub notes: Vec<ScannedNote>,
+    /// Folders (vault-relative) that could not be listed. Their notes are
+    /// missing from `notes` but must not be treated as deleted.
+    pub unreadable: Vec<String>,
 }
 
 /// Recursively scan a vault for Markdown notes, skipping config/VCS folders and
 /// dotfiles. Cloud placeholders are reported as non-materialized notes under
 /// their real path; a materialized file always wins over a placeholder.
 pub fn scan_vault(root: &Path) -> Vec<ScannedNote> {
+    scan_vault_report(root).map(|s| s.notes).unwrap_or_default()
+}
+
+/// Like [`scan_vault`], but fails if the vault folder itself is missing or
+/// unreadable (for example a cloud drive that is not mounted yet), and reports
+/// subfolders it could not list, so callers never mistake an unreadable folder
+/// for an empty one.
+pub fn scan_vault_report(root: &Path) -> io::Result<VaultScan> {
     use std::collections::BTreeMap;
+    fs::read_dir(root)?;
     let mut found: BTreeMap<String, ScannedNote> = BTreeMap::new();
+    let mut unreadable = Vec::new();
 
     let walker = WalkDir::new(root).follow_links(false).into_iter();
     for entry in walker.filter_entry(|e| {
@@ -181,7 +481,16 @@ pub fn scan_vault(root: &Path) -> Vec<ScannedNote> {
             true
         }
     }) {
-        let Ok(entry) = entry else { continue };
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                match err.path().and_then(|p| rel_path_str(root, p)) {
+                    Some(rel) if !rel.is_empty() => unreadable.push(rel),
+                    _ => return Err(err.into()),
+                }
+                continue;
+            }
+        };
         if !entry.file_type().is_file() {
             continue;
         }
@@ -224,7 +533,10 @@ pub fn scan_vault(root: &Path) -> Vec<ScannedNote> {
             .or_insert(note);
     }
 
-    found.into_values().collect()
+    Ok(VaultScan {
+        notes: found.into_values().collect(),
+        unreadable,
+    })
 }
 
 /// List vault-relative paths with the given extension (e.g. "canvas"),
@@ -373,6 +685,80 @@ mod tests {
         let path = dir.path().join("a.md");
         write(&path, "hi");
         assert!(!is_dataless(&fs::metadata(&path).unwrap()));
+    }
+
+    #[test]
+    fn note_file_names_are_safe_everywhere() {
+        assert_eq!(note_file_name("Plan: Q3/Q4?"), "Plan- Q3-Q4-");
+        assert_eq!(note_file_name(".NET tips"), "NET tips");
+        assert_eq!(note_file_name("  ...  "), "Untitled");
+        assert_eq!(note_file_name("trailing. "), "trailing");
+        assert_eq!(note_file_name("con"), "con note");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_keeps_permissions_and_writes_through_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("a.md");
+        write(&note, "old");
+        fs::set_permissions(&note, fs::Permissions::from_mode(0o640)).unwrap();
+        write_note_atomic(&note, "new").unwrap();
+        assert_eq!(fs::metadata(&note).unwrap().permissions().mode() & 0o777, 0o640);
+
+        let fresh = dir.path().join("b.md");
+        write_note_atomic(&fresh, "x").unwrap();
+        assert_eq!(fs::metadata(&fresh).unwrap().permissions().mode() & 0o777, 0o644);
+
+        let link = dir.path().join("link.md");
+        std::os::unix::fs::symlink(&note, &link).unwrap();
+        write_note_atomic(&link, "through").unwrap();
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&note).unwrap(), "through");
+    }
+
+    #[test]
+    fn exclusive_create_never_replaces_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.md");
+        create_file_exclusive(&path, b"one").unwrap();
+        let err = create_file_exclusive(&path, b"two").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "one");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_join_refuses_symlinks_out_of_the_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        write(&outside.path().join("secret.md"), "x");
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).unwrap();
+        assert!(safe_join(dir.path(), "linked/secret.md").is_err());
+        assert!(safe_join(dir.path(), "linked/new.md").is_err());
+        assert!(safe_join(dir.path(), "inside/new.md").is_ok());
+    }
+
+    #[test]
+    fn attachments_resolve_like_obsidian() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(&root.join("Projects/pic.png"), "near");
+        write(&root.join("pic.png"), "root");
+        write(&root.join("assets/deep/only.png"), "deep");
+        write(&root.join("assets/shared.png"), "shallow");
+        write(&root.join("other/very/deep/shared.png"), "deeper");
+        let read = |from: Option<&str>, target: &str| {
+            fs::read_to_string(resolve_attachment(root, from, target).unwrap()).unwrap()
+        };
+        assert_eq!(read(Some("Projects/x.md"), "pic.png"), "near");
+        assert_eq!(read(Some("x.md"), "pic.png"), "root");
+        assert_eq!(read(Some("Projects/x.md"), "../pic.png"), "root");
+        assert_eq!(read(None, "only.png"), "deep");
+        assert_eq!(read(None, "shared.png"), "shallow");
+        assert!(resolve_attachment(root, None, "missing.png").is_err());
+        assert!(resolve_attachment(root, Some("x.md"), "../../etc/passwd").is_err());
     }
 
     #[test]

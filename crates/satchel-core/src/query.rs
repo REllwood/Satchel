@@ -45,8 +45,18 @@ pub fn open_query_connection(path: &Path) -> Result<Connection> {
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.pragma_update(None, "query_only", true)?;
     conn.authorizer(Some(read_only_authorizer))?;
+    // No single value may grow past this, so one expression such as
+    // printf('%.*c', 1e9, 'x') cannot use gigabytes of memory.
+    conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, MAX_VALUE_BYTES as i32)?;
     Ok(conn)
 }
+
+/// Largest single text or blob value a query may produce.
+const MAX_VALUE_BYTES: usize = 16 * 1024 * 1024;
+/// Total text a query may return before the result is cut short.
+const MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
+/// Most rows a query may return, whatever the caller asks for.
+const MAX_ROWS: usize = 10_000;
 
 fn cell_to_json(value: ValueRef<'_>) -> serde_json::Value {
     use serde_json::Value;
@@ -66,10 +76,10 @@ pub fn run_query(conn: &Connection, sql: &str, max_rows: usize) -> Result<QueryR
     let start = std::time::Instant::now();
     // Best-effort: if the handler can't be installed the query still runs.
     let _ = conn.progress_handler(
-        10_000,
+        1_000,
         Some(move || start.elapsed() > std::time::Duration::from_secs(3)),
     );
-    let result = run_query_inner(conn, sql, max_rows);
+    let result = run_query_inner(conn, sql, max_rows.clamp(1, MAX_ROWS));
     let _ = conn.progress_handler::<fn() -> bool>(0, None);
     result
 }
@@ -84,15 +94,18 @@ fn run_query_inner(conn: &Connection, sql: &str, max_rows: usize) -> Result<Quer
 
     let mut rows_out: Vec<Vec<serde_json::Value>> = Vec::new();
     let mut truncated = false;
+    let mut bytes = 0usize;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
-        if rows_out.len() >= max_rows {
+        if rows_out.len() >= max_rows || bytes > MAX_RESULT_BYTES {
             truncated = true;
             break;
         }
         let mut record = Vec::with_capacity(col_count);
         for i in 0..col_count {
-            record.push(cell_to_json(row.get_ref(i)?));
+            let cell = cell_to_json(row.get_ref(i)?);
+            bytes += cell.as_str().map_or(8, str::len);
+            record.push(cell);
         }
         rows_out.push(record);
     }
@@ -134,6 +147,27 @@ mod tests {
         let result = run_query(&conn, "SELECT count(*) AS n FROM notes", 100).unwrap();
         assert_eq!(result.columns, vec!["n".to_string()]);
         assert_eq!(result.rows[0][0], serde_json::json!(5));
+    }
+
+    #[test]
+    fn huge_values_and_results_are_refused_quickly() {
+        let (_d, path) = populated_db();
+        let conn = open_query_connection(&path).unwrap();
+        let started = std::time::Instant::now();
+        // SQLite refuses to build either value: an error or NULL, never 250 MB.
+        for sql in ["SELECT printf('%.*c', 250000000, 'x')", "SELECT zeroblob(1000000000)"] {
+            if let Ok(result) = run_query(&conn, sql, 10) {
+                assert_eq!(result.rows[0][0], serde_json::Value::Null, "{sql}");
+            }
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+
+        // Many 1 MB rows stop at the total result cap.
+        let sql = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 50)
+                   SELECT printf('%.*c', 1000000, 'x') FROM n";
+        let result = run_query(&conn, sql, 1000).unwrap();
+        assert!(result.truncated);
+        assert!(result.rows.len() < 20);
     }
 
     #[test]

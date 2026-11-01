@@ -1,5 +1,4 @@
 // Typed bindings for the Rust command surface. The UI only talks to these.
-// Arg keys are snake_case to match the Rust command parameter names exactly.
 import { invoke } from "@tauri-apps/api/core";
 
 export type HitSource = "full_text" | "semantic" | "hybrid";
@@ -18,6 +17,8 @@ export interface VaultInfo {
   provider: Provider;
   /** e.g. "iCloud Drive", "This computer" */
   provider_name: string;
+  /** The welcome note, when `create_vault` just wrote one into a new vault. */
+  welcome_note: string | null;
 }
 
 /** A place a vault can live (detected cloud folder or local). */
@@ -64,6 +65,10 @@ export interface IndexStats {
   updated: number;
   unchanged: number;
   removed: number;
+  /** Notes found at a new path (moved or renamed outside the app). */
+  moved: number;
+  /** Notes that could not be read this time, left as they were. */
+  skipped: number;
   total: number;
 }
 export interface Backlink {
@@ -106,10 +111,20 @@ export const reindex = () => invoke<IndexStats>("reindex");
 export const embedVault = () => invoke<void>("embed_vault");
 export const addAgentDocs = () => invoke<void>("add_agent_docs");
 
+/**
+ * Emitted when the window is closing or the app is quitting. Save pending
+ * edits, then call `confirmExit`. The app quits on its own after a few
+ * seconds if it is not confirmed.
+ */
+export const APP_EXIT_REQUESTED = "app-exit-requested";
+export const confirmExit = () => invoke<void>("confirm_exit");
+
 /** Ready-to-paste MCP setup for AI tools, pointing at this app + vault. */
 export interface AgentSetup {
   claude_code: string;
   codex: string;
+  /** Set when the app is running from a location that may not last (a disk image). */
+  warning: string | null;
 }
 export const agentSetup = () => invoke<AgentSetup>("agent_setup");
 
@@ -117,8 +132,9 @@ export const agentSetup = () => invoke<AgentSetup>("agent_setup");
 export const listFolders = () => invoke<string[]>("list_folders");
 export const createFolder = (relPath: string) =>
   invoke<void>("create_folder", { relPath });
+/** Returns how many other notes had links to the moved notes rewritten. */
 export const renameFolder = (from: string, to: string) =>
-  invoke<void>("rename_folder", { from, to });
+  invoke<number>("rename_folder", { from, to });
 export const deleteFolder = (relPath: string) =>
   invoke<void>("delete_folder", { relPath });
 
@@ -130,19 +146,29 @@ export const writeNote = (relPath: string, content: string) =>
   invoke<void>("write_note", { relPath, content });
 export const createNote = (relPath: string, content?: string) =>
   invoke<string>("create_note", { relPath, content: content ?? null });
+/** Returns how many other notes had links to it rewritten. */
 export const renameNote = (from: string, to: string) =>
-  invoke<void>("rename_note", { from, to });
+  invoke<number>("rename_note", { from, to });
 export const deleteNote = (relPath: string) =>
   invoke<void>("delete_note", { relPath });
 
 // ---- attachments -----------------------------------------------------------
-export const saveAttachment = (bytes: number[], ext: string) =>
-  invoke<string>("save_attachment", { bytes, ext });
-export const readAttachment = (relPath: string) =>
-  invoke<number[]>("read_attachment", { relPath });
+/** Store a file in the vault's attachments/ folder. Returns its vault path. */
+export const saveAttachment = (bytes: Uint8Array, ext: string) =>
+  invoke<string>("save_attachment", bytes, { headers: { "x-satchel-ext": ext } });
+/**
+ * Read an embedded file. `target` is the path as written in the note. It is
+ * resolved next to `fromNote` first, then from the vault root, then (for a
+ * bare file name) anywhere in the vault.
+ */
+export const readAttachment = (target: string, fromNote: string | null) =>
+  invoke<ArrayBuffer>("read_attachment", { target, fromNote });
 
 // ---- canvas (JSONCanvas) ---------------------------------------------------
+// Canvas objects keep any fields Satchel does not use, so saving a canvas
+// made in another app does not drop them.
 export interface CanvasNode {
+  [key: string]: unknown;
   id: string;
   type: string; // text | file | link | group
   x: number;
@@ -156,6 +182,7 @@ export interface CanvasNode {
   label?: string;
 }
 export interface CanvasEdge {
+  [key: string]: unknown;
   id: string;
   fromNode: string;
   toNode: string;
@@ -165,6 +192,7 @@ export interface CanvasEdge {
   label?: string;
 }
 export interface Canvas {
+  [key: string]: unknown;
   nodes: CanvasNode[];
   edges: CanvasEdge[];
 }

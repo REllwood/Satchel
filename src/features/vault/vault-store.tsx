@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -14,6 +15,7 @@ import { toast } from "sonner";
 import * as api from "@/lib/api";
 import { isTauri } from "@/lib/ipc";
 import { flushPendingSave } from "@/features/editor/pending-save";
+import { isNoteTarget } from "@/features/editor/link-target";
 
 interface VaultContextValue {
   vault: api.VaultInfo | null;
@@ -60,6 +62,11 @@ const VaultContext = createContext<VaultContextValue | null>(null);
 const fileName = (relPath: string) => relPath.split("/").pop() ?? relPath;
 const join = (folder: string, name: string) => (folder ? `${folder}/${name}` : name);
 
+/** Tell the user how many other notes had their links rewritten by a rename. */
+function reportLinkUpdates(count: number) {
+  if (count > 0) toast.success(`Updated links in ${count} ${count === 1 ? "note" : "notes"}`);
+}
+
 export function VaultProvider({ children }: { children: ReactNode }) {
   const [vault, setVault] = useState<api.VaultInfo | null>(null);
   const [booting, setBooting] = useState(isTauri);
@@ -71,20 +78,37 @@ export function VaultProvider({ children }: { children: ReactNode }) {
   const [tagFilter, setTagFilterState] = useState<string | null>(null);
   const [tagPaths, setTagPaths] = useState<Set<string>>(new Set());
 
-  const setTagFilter = useCallback(async (tag: string | null) => {
+  // The tag last asked for, the one shown, and a counter so only the newest
+  // lookup applies (quick clicks and note changes can answer out of order).
+  const wantedTag = useRef<string | null>(null);
+  const shownTag = useRef<string | null>(null);
+  const tagRequest = useRef(0);
+
+  /** Look up the notes for `tag` and show them, unless a newer lookup started. */
+  const loadTag = useCallback(async (tag: string | null, quiet = false) => {
+    const request = ++tagRequest.current;
+    wantedTag.current = tag;
     if (!tag) {
+      shownTag.current = null;
       setTagFilterState(null);
       setTagPaths(new Set());
       return;
     }
     try {
       const paths = await api.notesForTag(tag);
+      if (request !== tagRequest.current) return;
+      shownTag.current = tag;
       setTagPaths(new Set(paths));
       setTagFilterState(tag);
     } catch (e) {
-      toast.error(`Couldn't filter by tag: ${e}`);
+      if (request !== tagRequest.current || quiet) return;
+      // Keep the filter that is showing, rather than switching to this tag later.
+      wantedTag.current = shownTag.current;
+      toast.error(`Could not filter by tag: ${e}`);
     }
   }, []);
+
+  const setTagFilter = useCallback((tag: string | null) => loadTag(tag), [loadTag]);
 
   const refresh = useCallback(async () => {
     try {
@@ -100,11 +124,10 @@ export function VaultProvider({ children }: { children: ReactNode }) {
     async (info: api.VaultInfo) => {
       setVault(info);
       setSelected(null);
-      setTagFilterState(null);
-      setTagPaths(new Set());
+      void loadTag(null);
       await refresh();
     },
-    [refresh],
+    [refresh, loadTag],
   );
 
   const openPath = useCallback(
@@ -127,8 +150,8 @@ export function VaultProvider({ children }: { children: ReactNode }) {
       try {
         const info = await api.createVault(path);
         await adopt(info);
-        // Open the welcome note in a brand-new vault.
-        if (info.note_count === 1) setSelected("Welcome to Satchel.md");
+        // Open the welcome note when one was just written into a new vault.
+        if (info.welcome_note) setSelected(info.welcome_note);
       } catch (e) {
         toast.error(`${e}`);
       } finally {
@@ -158,9 +181,8 @@ export function VaultProvider({ children }: { children: ReactNode }) {
     setNotes([]);
     setFolders([]);
     setSelected(null);
-    setTagFilterState(null);
-    setTagPaths(new Set());
-  }, []);
+    void loadTag(null);
+  }, [loadTag]);
 
   const createNote = useCallback(
     async (folder = "") => {
@@ -180,9 +202,10 @@ export function VaultProvider({ children }: { children: ReactNode }) {
       if (from === to) return;
       try {
         await flushPendingSave();
-        await api.renameNote(from, to);
+        const updated = await api.renameNote(from, to);
         await refresh();
         setSelected((s) => (s === from ? to : s));
+        reportLinkUpdates(updated);
       } catch (e) {
         toast.error(`Rename failed: ${e}`);
       }
@@ -229,9 +252,10 @@ export function VaultProvider({ children }: { children: ReactNode }) {
       if (from === to) return;
       try {
         await flushPendingSave();
-        await api.renameFolder(from, to);
+        const updated = await api.renameFolder(from, to);
         await refresh();
         setSelected((s) => (s && s.startsWith(`${from}/`) ? `${to}${s.slice(from.length)}` : s));
+        reportLinkUpdates(updated);
       } catch (e) {
         toast.error(`Rename failed: ${e}`);
       }
@@ -257,21 +281,24 @@ export function VaultProvider({ children }: { children: ReactNode }) {
   const openOrCreate = useCallback(
     async (target: string) => {
       const t = target.toLowerCase();
+      // `[[Note.md]]` names the same note as `[[Note]]`.
+      const bare = t.replace(/\.md$/, "");
       const match = notes.find((n) => {
         const stem = fileName(n.rel_path).replace(/\.md$/i, "").toLowerCase();
         return (
-          stem === t ||
+          stem === bare ||
           n.title.trim().toLowerCase() === t ||
-          n.rel_path.toLowerCase() === t ||
-          n.rel_path.replace(/\.md$/i, "").toLowerCase() === t
+          n.rel_path.replace(/\.md$/i, "").toLowerCase() === bare
         );
       });
       if (match) {
         setSelected(match.rel_path);
         return;
       }
+      // Never create a note for an attachment (`x.png.md`) or a hidden name.
+      if (!isNoteTarget(target)) return;
       try {
-        const rel = await api.createNote(`${target}.md`);
+        const rel = await api.createNote(/\.md$/i.test(target) ? target : `${target}.md`);
         await refresh();
         setSelected(rel);
       } catch (e) {
@@ -314,6 +341,11 @@ export function VaultProvider({ children }: { children: ReactNode }) {
       }
     })();
   }, [openPath]);
+
+  // Keep the tag filter current as notes change (refresh gives a new list).
+  useEffect(() => {
+    if (wantedTag.current) void loadTag(wantedTag.current, true);
+  }, [notes, loadTag]);
 
   // External changes (AI tools, cloud sync) → refresh the note list.
   useEffect(() => {

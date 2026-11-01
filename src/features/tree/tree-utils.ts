@@ -84,3 +84,33 @@ export function cleanFolderName(input: string): string | null {
   if (parts.some((p) => p === "." || p === ".." || p.startsWith("."))) return null;
   return parts.join("/");
 }
+
+/** A row of the tree as shown, with what assistive tech needs to place it. */
+export interface TreeRow {
+  node: TreeNode;
+  /** 1 for the top level (aria-level). */
+  level: number;
+  /** The folder it sits in, or null at the top level. */
+  parent: string | null;
+  /** Position among its siblings, from 1 (aria-posinset and aria-setsize). */
+  posInSet: number;
+  setSize: number;
+}
+
+/** The rows the tree shows, in order, leaving out the contents of collapsed folders. */
+export function visibleRows(root: TreeNode, collapsed: ReadonlySet<string>): TreeRow[] {
+  const rows: TreeRow[] = [];
+  const walk = (dir: TreeNode, level: number, parent: string | null) => {
+    dir.children.forEach((node, i) => {
+      rows.push({ node, level, parent, posInSet: i + 1, setSize: dir.children.length });
+      if (node.isDir && !collapsed.has(node.path)) walk(node, level + 1, node.path);
+    });
+  };
+  walk(root, 1, null);
+  return rows;
+}
+
+/** A key that tells a folder from a note at the same path. */
+export function rowKey(node: TreeNode): string {
+  return `${node.isDir ? "d" : "f"}:${node.path}`;
+}

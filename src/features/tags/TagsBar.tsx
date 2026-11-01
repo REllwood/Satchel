@@ -11,24 +11,36 @@ export function TagsBar() {
   const [tags, setTags] = useState<api.TagCount[]>([]);
 
   useEffect(() => {
+    let cancelled = false;
     api
       .getTags()
-      .then(setTags)
-      .catch(() => setTags([]));
+      .then((t) => !cancelled && setTags(t))
+      .catch(() => !cancelled && setTags([]));
+    return () => {
+      cancelled = true;
+    };
   }, [notes]);
 
-  if (tags.length === 0) return null;
+  // The active filter stays visible (so it can be cleared) even when no note
+  // has the tag any more, or it is past the first 40.
+  const shown = tags.slice(0, 40);
+  if (tagFilter && !shown.some((t) => t.tag === tagFilter)) {
+    const active = tags.find((t) => t.tag === tagFilter) ?? { tag: tagFilter, count: 0 };
+    shown.unshift(active);
+  }
+  if (shown.length === 0) return null;
 
   return (
     <div className="flex flex-wrap gap-1 px-2 pb-2">
-      {tags.slice(0, 40).map((t) => {
+      {shown.map((t) => {
         const active = tagFilter === t.tag;
         return (
           <button
             key={t.tag}
             type="button"
             aria-pressed={active}
-            onClick={() => setTagFilter(active ? null : t.tag)}
+            title={active ? "Clear the filter" : undefined}
+            onClick={() => void setTagFilter(active ? null : t.tag)}
           >
             <Badge
               variant={active ? "default" : "secondary"}

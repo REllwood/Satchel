@@ -7,17 +7,14 @@ use std::sync::{Arc, Mutex};
 use satchel_core::embed::Embedder;
 use satchel_core::rusqlite::Connection;
 
-/// An open vault: the writer connection, a sandboxed read-only query
-/// connection, and a lazily-loaded embedder.
+/// An open vault: the writer connection and a sandboxed read-only query
+/// connection.
 pub struct Vault {
     pub root: PathBuf,
     /// Single writer (the app), WAL mode.
     pub conn: Connection,
     /// `query_only` + authorizer connection for the in-app query view.
     pub query_conn: Connection,
-    /// Loaded by the background semantic indexer (model load is not free).
-    /// Shared so the indexer can run the model without holding the vault lock.
-    pub embedder: Option<Arc<Embedder>>,
     /// RAII guard: held only to keep the file watcher alive; dropped (stopping
     /// the watch) when the vault is replaced or closed.
     #[allow(dead_code)]
@@ -77,8 +74,15 @@ pub struct AppState {
     pub vault: Mutex<Option<Vault>>,
     /// The bundled embedding model, resolved from the app's resources.
     pub model_dir: PathBuf,
+    /// The embedding model, loaded on first use and shared by every vault.
+    /// Held outside the vault lock so running it never blocks other commands.
+    embedder: Mutex<Option<Arc<Embedder>>>,
+    /// Held while the model loads, so two callers never load it twice.
+    loading: Mutex<()>,
     /// The background semantic indexer's run state.
     pub embed_queue: EmbedQueue,
+    /// Set once quitting has started (see `commands::request_exit`).
+    pub exiting: AtomicBool,
 }
 
 impl AppState {
@@ -86,8 +90,32 @@ impl AppState {
         Self {
             vault: Mutex::new(None),
             model_dir,
+            embedder: Mutex::new(None),
+            loading: Mutex::new(()),
             embed_queue: EmbedQueue::default(),
+            exiting: AtomicBool::new(false),
         }
+    }
+
+    /// The embedding model, loading it on first use. Loading takes a moment,
+    /// so never call this while holding the vault lock.
+    pub fn embedder(&self) -> Result<Arc<Embedder>, String> {
+        if let Some(embedder) = self.loaded_embedder() {
+            return Ok(embedder);
+        }
+        let _loading = self.loading.lock().map_err(|_| "state poisoned")?;
+        if let Some(embedder) = self.loaded_embedder() {
+            return Ok(embedder); // another caller loaded it while we waited
+        }
+        let embedder = Arc::new(Embedder::from_dir(&self.model_dir).map_err(|e| e.to_string())?);
+        *self.embedder.lock().map_err(|_| "state poisoned")? = Some(embedder.clone());
+        Ok(embedder)
+    }
+
+    /// The embedding model if it is already loaded. Semantic search is then
+    /// in use this session, so changed notes should be embedded again.
+    pub fn loaded_embedder(&self) -> Option<Arc<Embedder>> {
+        self.embedder.lock().ok().and_then(|e| e.clone())
     }
 }
 

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use satchel_core::{db, index, query};
 use serde_json::{json, Value};
-use tauri::ipc::{CallbackFn, InvokeBody};
+use tauri::ipc::{CallbackFn, InvokeBody, InvokeResponseBody};
 use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, MockRuntime, INVOKE_KEY};
 use tauri::webview::InvokeRequest;
 use tauri::{WebviewWindow, WebviewWindowBuilder};
@@ -15,17 +15,26 @@ use tauri::{WebviewWindow, WebviewWindowBuilder};
 use crate::commands;
 use crate::state::{AppState, Vault};
 
-fn invoke(webview: &WebviewWindow<MockRuntime>, cmd: &str, args: Value) -> Result<Value, Value> {
+fn send(
+    webview: &WebviewWindow<MockRuntime>,
+    cmd: &str,
+    body: InvokeBody,
+    headers: tauri::http::HeaderMap,
+) -> Result<InvokeResponseBody, Value> {
     let request = InvokeRequest {
         cmd: cmd.into(),
         callback: CallbackFn(0),
         error: CallbackFn(1),
         url: "tauri://localhost".parse().unwrap(),
-        body: InvokeBody::Json(args),
-        headers: Default::default(),
+        body,
+        headers,
         invoke_key: INVOKE_KEY.to_string(),
     };
-    get_ipc_response(webview, request).map(|body| body.deserialize().unwrap())
+    get_ipc_response(webview, request)
+}
+
+fn invoke(webview: &WebviewWindow<MockRuntime>, cmd: &str, args: Value) -> Result<Value, Value> {
+    send(webview, cmd, InvokeBody::Json(args), Default::default()).map(|body| body.deserialize().unwrap())
 }
 
 #[test]
@@ -44,7 +53,6 @@ fn commands_accept_the_frontends_argument_names() {
         root: root.clone(),
         conn,
         query_conn: query::open_query_connection(&db_path).unwrap(),
-        embedder: None,
         watch: None,
     });
 
@@ -57,6 +65,7 @@ fn commands_accept_the_frontends_argument_names() {
             commands::create_note,
             commands::rename_note,
             commands::create_folder,
+            commands::save_attachment,
             commands::read_attachment,
             commands::create_canvas,
             commands::read_canvas,
@@ -78,14 +87,31 @@ fn commands_accept_the_frontends_argument_names() {
 
     let created = invoke(&webview, "create_note", json!({ "relPath": "c.md", "content": null }));
     assert_eq!(created.unwrap(), "c.md");
-    invoke(&webview, "rename_note", json!({ "from": "c.md", "to": "d.md" })).unwrap();
+    let rewritten = invoke(&webview, "rename_note", json!({ "from": "c.md", "to": "d.md" })).unwrap();
+    assert_eq!(rewritten, 0);
     assert!(root.join("d.md").is_file());
 
     invoke(&webview, "create_folder", json!({ "relPath": "Projects" })).unwrap();
     assert!(root.join("Projects").is_dir());
 
-    std::fs::write(root.join("pic.png"), [1u8, 2, 3]).unwrap();
-    invoke(&webview, "read_attachment", json!({ "relPath": "pic.png" })).unwrap();
+    // Attachments travel as raw bytes, not JSON arrays of numbers.
+    let mut headers = tauri::http::HeaderMap::new();
+    headers.insert("x-satchel-ext", "png".parse().unwrap());
+    let saved = send(&webview, "save_attachment", InvokeBody::Raw(vec![1, 2, 3]), headers).unwrap();
+    let saved: String = saved.deserialize().unwrap();
+    assert!(saved.starts_with("attachments/") && saved.ends_with(".png"), "{saved}");
+    let name = saved.trim_start_matches("attachments/");
+    let read = send(
+        &webview,
+        "read_attachment",
+        InvokeBody::Json(json!({ "target": name, "fromNote": "a.md" })),
+        Default::default(),
+    )
+    .unwrap();
+    match read {
+        InvokeResponseBody::Raw(bytes) => assert_eq!(bytes, vec![1, 2, 3]),
+        other => panic!("expected raw bytes, got {other:?}"),
+    }
 
     let board = invoke(&webview, "create_canvas", json!({ "relPath": "Board" })).unwrap();
     assert_eq!(board, "Board.canvas");

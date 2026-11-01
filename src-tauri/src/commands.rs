@@ -14,7 +14,7 @@ use satchel_core::query::{self, QueryResult};
 use satchel_core::search::{self, semantic, SearchHit};
 use satchel_core::{agents, db, paths, rusqlite, vault, watch};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 use crate::state::{AppState, Vault};
 
@@ -150,14 +150,14 @@ fn vault_info(root: &Path, conn: &rusqlite::Connection) -> Result<VaultInfo, Str
     })
 }
 
-fn last_vault_file(app: &AppHandle) -> Option<PathBuf> {
+fn last_vault_file<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     app.path()
         .app_config_dir()
         .ok()
         .map(|d| d.join("last_vault.txt"))
 }
 
-fn remember_last_vault(app: &AppHandle, root: &Path) {
+fn remember_last_vault<R: Runtime>(app: &AppHandle<R>, root: &Path) {
     if let Some(file) = last_vault_file(app) {
         if let Some(parent) = file.parent() {
             let _ = fs::create_dir_all(parent);
@@ -170,7 +170,7 @@ fn remember_last_vault(app: &AppHandle, root: &Path) {
 /// the index and notify the frontend. Own-writes are idempotent re-indexes.
 /// Changed notes are embedded afterwards by the background indexer, so a big
 /// sync never holds the vault lock while the model runs.
-fn start_watcher(app: &AppHandle, root: &Path) -> Option<watch::WatchGuard> {
+fn start_watcher<R: Runtime>(app: &AppHandle<R>, root: &Path) -> Option<watch::WatchGuard> {
     let app = app.clone();
     let watched = root.to_path_buf();
     watch::start(root, move |events| {
@@ -193,8 +193,8 @@ fn start_watcher(app: &AppHandle, root: &Path) -> Option<watch::WatchGuard> {
     .ok()
 }
 
-fn open_vault_at(
-    app: &AppHandle,
+fn open_vault_at<R: Runtime>(
+    app: &AppHandle<R>,
     state: &State<AppState>,
     root: PathBuf,
 ) -> Result<VaultInfo, String> {
@@ -250,8 +250,8 @@ pub fn detect_sync_locations() -> Vec<SyncLocation> {
 
 /// Create (if needed) and open a vault folder, adding a welcome note to a new one.
 #[tauri::command(async)]
-pub fn create_vault(
-    app: AppHandle,
+pub fn create_vault<R: Runtime>(
+    app: AppHandle<R>,
     state: State<AppState>,
     path: String,
 ) -> Result<VaultInfo, String> {
@@ -265,8 +265,8 @@ pub fn create_vault(
 }
 
 #[tauri::command(async)]
-pub fn open_vault(
-    app: AppHandle,
+pub fn open_vault<R: Runtime>(
+    app: AppHandle<R>,
     state: State<AppState>,
     path: String,
 ) -> Result<VaultInfo, String> {
@@ -289,7 +289,7 @@ pub fn close_vault(state: State<AppState>) -> Result<(), String> {
 }
 
 #[tauri::command(async)]
-pub fn get_last_vault(app: AppHandle) -> Option<String> {
+pub fn get_last_vault<R: Runtime>(app: AppHandle<R>) -> Option<String> {
     last_vault_file(&app)
         .and_then(|f| fs::read_to_string(f).ok())
         .map(|s| s.trim().to_string())
@@ -317,7 +317,7 @@ struct Progress {
 }
 
 impl Progress {
-    fn report(&mut self, app: &AppHandle, done: usize, total: usize) {
+    fn report<R: Runtime>(&mut self, app: &AppHandle<R>, done: usize, total: usize) {
         let too_soon = self.started.elapsed() < SHOW_PROGRESS_AFTER;
         if too_soon || (self.shown && !done.is_multiple_of(10)) {
             return;
@@ -334,7 +334,7 @@ impl Progress {
 /// starts if idle, or else runs another pass when its current one finishes.
 /// It embeds one note at a time and runs the model without holding the vault
 /// lock, so saves, searches and the rest of the UI stay responsive.
-pub fn spawn_semantic_indexer(app: AppHandle) {
+pub fn spawn_semantic_indexer<R: Runtime>(app: AppHandle<R>) {
     if !app.state::<AppState>().embed_queue.request() {
         return;
     }
@@ -367,8 +367,8 @@ pub fn spawn_semantic_indexer(app: AppHandle) {
 }
 
 /// One pass: embed every note that has content but no embeddings yet.
-fn run_semantic_indexer(
-    app: &AppHandle,
+fn run_semantic_indexer<R: Runtime>(
+    app: &AppHandle<R>,
     progress: &mut Progress,
 ) -> Result<(usize, usize), String> {
     let state = app.state::<AppState>();
@@ -428,7 +428,7 @@ fn run_semantic_indexer(
 
 /// Rebuild all embeddings from scratch (in the background).
 #[tauri::command(async)]
-pub fn embed_vault(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+pub fn embed_vault<R: Runtime>(app: AppHandle<R>, state: State<AppState>) -> Result<(), String> {
     if state.embed_queue.is_running() {
         return Err("Semantic indexing is already running".into());
     }
@@ -536,8 +536,8 @@ fn reindex_one(v: &mut Vault, rel_path: &str) -> Result<bool, String> {
 }
 
 #[tauri::command(async)]
-pub fn write_note(
-    app: AppHandle,
+pub fn write_note<R: Runtime>(
+    app: AppHandle<R>,
     state: State<AppState>,
     rel_path: String,
     content: String,
@@ -554,8 +554,8 @@ pub fn write_note(
 }
 
 #[tauri::command(async)]
-pub fn create_note(
-    app: AppHandle,
+pub fn create_note<R: Runtime>(
+    app: AppHandle<R>,
     state: State<AppState>,
     rel_path: String,
     content: Option<String>,
@@ -592,8 +592,8 @@ pub fn create_note(
 }
 
 #[tauri::command(async)]
-pub fn rename_note(
-    app: AppHandle,
+pub fn rename_note<R: Runtime>(
+    app: AppHandle<R>,
     state: State<AppState>,
     from: String,
     to: String,
@@ -661,8 +661,8 @@ pub fn create_folder(state: State<AppState>, rel_path: String) -> Result<(), Str
 
 /// Rename or move a folder; its notes are re-indexed under their new paths.
 #[tauri::command(async)]
-pub fn rename_folder(
-    app: AppHandle,
+pub fn rename_folder<R: Runtime>(
+    app: AppHandle<R>,
     state: State<AppState>,
     from: String,
     to: String,

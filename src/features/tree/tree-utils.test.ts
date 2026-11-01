@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import type { NoteMeta } from "@/lib/api";
-import { buildTree, cleanFolderName, noteLabel, parentFolder } from "./tree-utils";
+import {
+  buildTree,
+  cleanFolderName,
+  noteLabel,
+  parentFolder,
+  rowKey,
+  visibleRows,
+} from "./tree-utils";
 
 const note = (rel_path: string, title = ""): NoteMeta => ({
   id: 0,
@@ -55,3 +62,37 @@ describe("folder helpers", () => {
     expect(cleanFolderName("   ")).toBeNull();
   });
 });
+
+describe("visibleRows", () => {
+  const tree = buildTree(
+    [note("a/x.md"), note("a/b/y.md"), note("top.md")],
+    ["a", "a/b", "empty"],
+  );
+  const describeRows = (collapsed: string[]) =>
+    visibleRows(tree, new Set(collapsed)).map(
+      (r) => `${r.level} ${rowKey(r.node)} ${r.parent ?? "-"} ${r.posInSet}/${r.setSize}`,
+    );
+
+  it("lists rows in order with their level, parent and position", () => {
+    expect(describeRows([])).toEqual([
+      "1 d:a - 1/3",
+      "2 d:a/b a 1/2",
+      "3 f:a/b/y.md a/b 1/1",
+      "2 f:a/x.md a 2/2",
+      "1 d:empty - 2/3",
+      "1 f:top.md - 3/3",
+    ]);
+  });
+
+  it("leaves out what is inside collapsed folders", () => {
+    expect(describeRows(["a/b"])).toEqual([
+      "1 d:a - 1/3",
+      "2 d:a/b a 1/2",
+      "2 f:a/x.md a 2/2",
+      "1 d:empty - 2/3",
+      "1 f:top.md - 3/3",
+    ]);
+    expect(describeRows(["a"])).toEqual(["1 d:a - 1/3", "1 d:empty - 2/3", "1 f:top.md - 3/3"]);
+  });
+});
+

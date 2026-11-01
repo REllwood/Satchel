@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow runs these checks before building installers.
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -14,6 +16,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # The version is set in package.json, Cargo.toml and tauri.conf.json,
+      # and they must agree.
+      - name: Check the versions match
+        run: |
+          pkg=$(node -p "require('./package.json').version")
+          tauri=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          cargo=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$pkg" != "$cargo" ] || [ "$pkg" != "$tauri" ]; then
+            echo "::error::package.json is $pkg, Cargo.toml is $cargo, tauri.conf.json is $tauri"
+            exit 1
+          fi
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - run: bun run test

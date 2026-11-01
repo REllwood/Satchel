@@ -79,7 +79,14 @@ export function SettingsDialog({
     try {
       const stats = await api.reindex();
       await refresh();
-      toast.success(`Reindexed ${stats.total} notes`);
+      if (stats.skipped > 0) {
+        const notes = stats.skipped === 1 ? "1 note" : `${stats.skipped} notes`;
+        toast.warning(
+          `Reindexed ${stats.total} notes. ${notes} could not be read and were left unchanged in the index.`,
+        );
+      } else {
+        toast.success(`Reindexed ${stats.total} notes`);
+      }
     } catch (e) {
       toast.error(`Reindex failed: ${e}`);
     } finally {
@@ -88,6 +95,18 @@ export function SettingsDialog({
   };
 
   const embedding = embedStatus?.running ?? false;
+
+  /** A row hint, plus the setup warning (an app run from a disk image, say) when there is one. */
+  const agentHint = (text: React.ReactNode) => (
+    <>
+      {text}
+      {setup?.warning && (
+        <span role="note" className="mt-1 block text-destructive">
+          {setup.warning}
+        </span>
+      )}
+    </>
+  );
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -167,7 +186,7 @@ export function SettingsDialog({
 
           <Row
             label="Claude Code"
-            hint="Lets Claude Code search and read these notes (MCP)."
+            hint={agentHint("Lets Claude Code search and read these notes (MCP).")}
           >
             <Button
               size="sm"
@@ -179,7 +198,14 @@ export function SettingsDialog({
             </Button>
           </Row>
 
-          <Row label="Codex" hint={<>Paste into <code>~/.codex/config.toml</code>.</>}>
+          <Row
+            label="Codex"
+            hint={agentHint(
+              <>
+                Paste into <code>~/.codex/config.toml</code>.
+              </>,
+            )}
+          >
             <Button
               size="sm"
               variant="outline"

@@ -1,17 +1,68 @@
 name: Release
 
-# Push a tag like v0.1.0 to build installers for every platform into a draft
-# GitHub release. Review the draft, then publish it.
+# Push a tag like v0.1.1 to test, then build installers for every platform into
+# one draft GitHub release named after the tag. Review the draft, then publish
+# it. The tag must match the version in package.json, Cargo.toml and
+# src-tauri/tauri.conf.json.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to release, such as v0.1.1 (it must already exist)
+        required: true
 
 permissions:
   contents: write
 
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - name: Check the tag matches the app version
+        run: |
+          want="${TAG#v}"
+          pkg=$(node -p "require('./package.json').version")
+          tauri=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          cargo=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$pkg" != "$want" ] || [ "$cargo" != "$want" ] || [ "$tauri" != "$want" ]; then
+            echo "::error::Tag $TAG does not match package.json ($pkg), Cargo.toml ($cargo) and tauri.conf.json ($tauri)"
+            exit 1
+          fi
+
+  test:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+
+  draft:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.draft.outputs.release_id }}
+    steps:
+      # One draft for all platforms, created before the builds start, so
+      # parallel builds never race to create it.
+      - id: draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          notes="Download the installer for your platform below. macOS builds need Apple silicon and macOS 13.4 or later. See the README for first-launch steps."
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+              --title "Satchel $TAG" --notes "$notes"
+          fi
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -1)
+          echo "release_id=$id" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: draft
     strategy:
       fail-fast: false
       matrix:
@@ -28,6 +79,8 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -44,9 +97,5 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tauriScript: bun tauri
-          tagName: v__VERSION__
-          releaseName: Satchel v__VERSION__
-          releaseBody: Download the installer for your platform below. macOS builds need Apple silicon and macOS 13.4 or later; see the README for first-launch steps.
-          releaseDraft: true
-          prerelease: false
+          releaseId: ${{ needs.draft.outputs.release_id }}
           args: ${{ matrix.args }}

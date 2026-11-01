@@ -138,22 +138,76 @@ pub fn detect_locations() -> Vec<SyncLocation> {
     }
 }
 
-/// Which provider (if any) syncs the folder at `path`.
+/// Which provider (if any) syncs the folder at `path`. Matches whole path
+/// components in the places each client keeps its folder, so a local folder
+/// that merely has "OneDrive" in its name is not mistaken for a synced one.
+/// Also follows symlinks, and recognises iCloud's "Desktop & Documents" sync.
 pub fn provider_for_path(path: &Path) -> Provider {
-    let p = path.to_string_lossy().replace('\\', "/");
-    if p.contains("/Library/Mobile Documents/") || p.contains("/iCloudDrive") {
-        Provider::ICloud
-    } else if p.contains("/Library/CloudStorage/GoogleDrive-") || p.contains("/My Drive") {
-        Provider::GoogleDrive
-    } else if p.contains("/Library/CloudStorage/Dropbox") || p.contains("/Dropbox/") || p.ends_with("/Dropbox") {
-        Provider::Dropbox
-    } else if p.contains("/Library/CloudStorage/OneDrive") || p.contains("/OneDrive") {
-        Provider::OneDrive
-    } else if p.contains("/Library/CloudStorage/Box") {
-        Provider::Box
-    } else {
-        Provider::Local
+    let by_name = provider_by_components(path);
+    if by_name != Provider::Local {
+        return by_name;
     }
+    if let Ok(real) = path.canonicalize() {
+        let by_target = provider_by_components(&real);
+        if by_target != Provider::Local {
+            return by_target;
+        }
+    }
+    match dirs::home_dir() {
+        Some(home) if icloud_syncs_desktop_or_documents(&home, path) => Provider::ICloud,
+        _ => Provider::Local,
+    }
+}
+
+fn provider_by_components(path: &Path) -> Provider {
+    let text = path.to_string_lossy().replace('\\', "/");
+    let parts: Vec<&str> = text.split('/').filter(|p| !p.is_empty()).collect();
+    let after = |a: &str, b: &str| {
+        parts
+            .windows(2)
+            .position(|w| w[0] == a && w[1] == b)
+            .and_then(|i| parts.get(i + 2).copied())
+    };
+    if parts.windows(2).any(|w| w == ["Library", "Mobile Documents"]) {
+        return Provider::ICloud;
+    }
+    if let Some(name) = after("Library", "CloudStorage") {
+        if name.starts_with("GoogleDrive-") {
+            return Provider::GoogleDrive;
+        } else if name.starts_with("Dropbox") {
+            return Provider::Dropbox;
+        } else if name.starts_with("OneDrive") {
+            return Provider::OneDrive;
+        } else if name.starts_with("Box") {
+            return Provider::Box;
+        }
+    }
+    // Folders the Windows and older clients create directly in the home
+    // folder (/Users/<name>, /home/<name> or C:/Users/<name>).
+    let home_child = parts
+        .windows(3)
+        .find(|w| w[0] == "Users" || w[0] == "home")
+        .map(|w| w[2]);
+    match home_child {
+        Some("iCloudDrive") => return Provider::ICloud,
+        Some(c) if c.starts_with("OneDrive") => return Provider::OneDrive,
+        Some(c) if c == "Dropbox" || c.starts_with("Dropbox (") => return Provider::Dropbox,
+        _ => {}
+    }
+    // Google Drive for desktop on Windows mounts as a drive, e.g. G:/My Drive.
+    if parts.len() >= 2 && parts[0].ends_with(':') && parts[1] == "My Drive" {
+        return Provider::GoogleDrive;
+    }
+    Provider::Local
+}
+
+/// True if `path` is in ~/Desktop or ~/Documents and iCloud Drive syncs that
+/// folder (it then also appears inside iCloud Drive).
+fn icloud_syncs_desktop_or_documents(home: &Path, path: &Path) -> bool {
+    let icloud = home.join("Library/Mobile Documents/com~apple~CloudDocs");
+    ["Desktop", "Documents"].iter().any(|name| {
+        path.starts_with(home.join(name)) && std::fs::symlink_metadata(icloud.join(name)).is_ok()
+    })
 }
 
 #[cfg(test)]
@@ -216,7 +270,12 @@ mod tests {
             ("/Users/a/Library/CloudStorage/Dropbox/Satchel", Provider::Dropbox),
             ("/Users/a/Library/CloudStorage/OneDrive-Personal/Satchel", Provider::OneDrive),
             (r"C:\Users\a\iCloudDrive\Satchel", Provider::ICloud),
+            (r"C:\Users\a\OneDrive - Contoso\Satchel", Provider::OneDrive),
+            (r"G:\My Drive\Satchel", Provider::GoogleDrive),
+            ("/home/a/Dropbox/Satchel", Provider::Dropbox),
             ("/Users/a/Satchel", Provider::Local),
+            ("/Users/a/Projects/OneDrive notes/Satchel", Provider::Local),
+            ("/Users/a/Documents/My Drive backup/Satchel", Provider::Local),
         ];
         for (path, want) in cases {
             assert_eq!(provider_for_path(Path::new(path)), want, "{path}");

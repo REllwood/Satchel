@@ -115,14 +115,16 @@ pub fn default_model_dir() -> PathBuf {
         .unwrap_or(dev)
 }
 
-/// Split a note body into chunks (~1200 chars), breaking at heading boundaries
-/// so each chunk is a coherent unit. Byte offsets index into `body`.
+/// Split a note body into chunks of about 300 model tokens (roughly 1200
+/// characters of English), breaking at heading boundaries so each chunk is a
+/// coherent unit. A line too long for one chunk is split after a sentence,
+/// else at a space, so no text falls past the model's 512-token input limit.
+/// Byte offsets index into `body`.
 pub fn chunk_text(body: &str) -> Vec<Chunk> {
-    const TARGET_CHARS: usize = 1200;
     let mut chunks = Vec::new();
     let mut ord = 0usize;
     let mut chunk_start = 0usize;
-    let mut chunk_chars = 0usize;
+    let mut chunk_tokens = 0usize;
     let mut buf = String::new();
     let mut offset = 0usize;
 
@@ -145,21 +147,96 @@ pub fn chunk_text(body: &str) -> Vec<Chunk> {
         if is_heading && !buf.trim().is_empty() {
             flush(chunk_start, offset, &buf, &mut ord);
             buf.clear();
-            chunk_chars = 0;
+            chunk_tokens = 0;
             chunk_start = offset;
         }
-        buf.push_str(line);
-        chunk_chars += line.chars().count();
-        offset += line.len();
-        if chunk_chars >= TARGET_CHARS {
-            flush(chunk_start, offset, &buf, &mut ord);
-            buf.clear();
-            chunk_chars = 0;
-            chunk_start = offset;
+        for piece in split_long_line(line) {
+            let tokens = estimate_tokens(piece);
+            if chunk_tokens > 0 && chunk_tokens + tokens > CHUNK_TOKENS {
+                flush(chunk_start, offset, &buf, &mut ord);
+                buf.clear();
+                chunk_tokens = 0;
+                chunk_start = offset;
+            }
+            buf.push_str(piece);
+            chunk_tokens += tokens;
+            offset += piece.len();
         }
     }
     flush(chunk_start, offset, &buf, &mut ord);
     chunks
+}
+
+/// Target chunk size in model tokens. The model reads at most 512.
+const CHUNK_TOKENS: usize = 300;
+
+/// Rough token count for MiniLM's tokenizer: each Chinese, Japanese or Korean
+/// character is about one token, and other text averages about four
+/// characters per token.
+fn estimate_tokens(text: &str) -> usize {
+    let (wide, other) = text.chars().fold((0usize, 0usize), |(w, o), c| {
+        if is_wide_char(c) {
+            (w + 1, o)
+        } else {
+            (w, o + 1)
+        }
+    });
+    wide + other.div_ceil(4)
+}
+
+fn is_wide_char(c: char) -> bool {
+    matches!(c as u32,
+        0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF
+        | 0xF900..=0xFAFF | 0xFF66..=0xFF9F | 0x20000..=0x2FFFF)
+}
+
+/// Split one line into consecutive pieces of at most [`CHUNK_TOKENS`], cutting
+/// after the end of a sentence where possible, else at a space, else anywhere
+/// (always on a character boundary). The pieces join back into `line`.
+fn split_long_line(line: &str) -> Vec<&str> {
+    if estimate_tokens(line) <= CHUNK_TOKENS {
+        return vec![line];
+    }
+    let mut pieces = Vec::new();
+    let mut start = 0usize;
+    let mut tokens = 0usize;
+    let mut run = 0usize; // non-wide characters since the last token was counted
+    let mut sentence_end = None;
+    let mut space = None;
+    let mut chars = line.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let next = i + c.len_utf8();
+        if is_wide_char(c) {
+            tokens += 1;
+        } else {
+            run += 1;
+            if run == 4 {
+                tokens += 1;
+                run = 0;
+            }
+        }
+        let next_char = chars.peek().map(|&(_, n)| n);
+        if matches!(c, '。' | '！' | '？')
+            || (matches!(c, '.' | '!' | '?') && next_char.is_none_or(char::is_whitespace))
+        {
+            sentence_end = Some(next);
+        } else if c.is_whitespace() {
+            space = Some(next);
+        }
+        if tokens >= CHUNK_TOKENS && next < line.len() {
+            let cut = sentence_end.or(space).filter(|&cut| cut > start).unwrap_or(next);
+            pieces.push(&line[start..cut]);
+            start = cut;
+            tokens = estimate_tokens(&line[cut..next]);
+            run = 0;
+            sentence_end = None;
+            space = None;
+        }
+    }
+    if start < line.len() {
+        pieces.push(&line[start..]);
+    }
+    pieces
 }
 
 #[cfg(test)]
@@ -178,6 +255,30 @@ mod tests {
         let chunks = chunk_text("# Title\n\njust a little text");
         assert_eq!(chunks.len(), 1);
         assert!(chunks[0].text.contains("little text"));
+    }
+
+    #[test]
+    fn long_single_line_paragraph_is_split_to_fit_the_model() {
+        let sentence = "The quarterly review covered hiring, budgets and the roadmap in detail. ";
+        let body = format!("{}The submarine periscope needs maintenance.", sentence.repeat(60));
+        let chunks = chunk_text(&body);
+        assert!(chunks.len() > 1, "a 4,000-character line must not be one chunk");
+        for chunk in &chunks {
+            assert!(estimate_tokens(&chunk.text) <= CHUNK_TOKENS + 4, "{}", chunk.text.len());
+            assert_eq!(&body[chunk.start..chunk.end].trim(), &chunk.text);
+        }
+        assert!(chunks.last().unwrap().text.contains("periscope"));
+        // Cuts land after full sentences, not mid-word.
+        assert!(chunks[0].text.ends_with("detail."), "{}", chunks[0].text);
+    }
+
+    #[test]
+    fn japanese_text_is_split_by_its_token_count() {
+        let body = "昨日は東京タワーに行った。".repeat(80); // about 1,000 wide characters
+        let chunks = chunk_text(&body);
+        assert!(chunks.len() >= 3, "got {}", chunks.len());
+        assert!(chunks.iter().all(|c| estimate_tokens(&c.text) <= CHUNK_TOKENS + 4));
+        assert!(chunks[0].text.ends_with('。'));
     }
 
     #[test]

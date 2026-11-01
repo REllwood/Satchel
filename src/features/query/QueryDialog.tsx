@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { X } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -43,9 +44,18 @@ interface SavedQuery {
 
 function loadSaved(): SavedQuery[] {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+    const saved: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+    return Array.isArray(saved) ? saved : [];
   } catch {
     return [];
+  }
+}
+
+function storeSaved(saved: SavedQuery[]) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
+  } catch {
+    toast.error("Could not store saved queries");
   }
 }
 
@@ -60,10 +70,14 @@ export function QueryDialog({
   const [result, setResult] = useState<api.QueryResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
+  // The state updates a render late, so a quick second ⌘↵ checks this instead.
+  const runningRef = useRef(false);
   const [saved, setSaved] = useState<SavedQuery[]>(loadSaved);
   const [name, setName] = useState("");
 
   const run = async () => {
+    if (runningRef.current) return;
+    runningRef.current = true;
     setRunning(true);
     setError(null);
     try {
@@ -72,6 +86,7 @@ export function QueryDialog({
       setError(String(e));
       setResult(null);
     } finally {
+      runningRef.current = false;
       setRunning(false);
     }
   };
@@ -81,9 +96,16 @@ export function QueryDialog({
     if (!n) return;
     const next = [...saved.filter((s) => s.name !== n), { name: n, sql }];
     setSaved(next);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    storeSaved(next);
     setName("");
     toast.success(`Saved query "${n}"`);
+  };
+
+  const remove = (query: SavedQuery) => {
+    const next = saved.filter((s) => s.name !== query.name);
+    setSaved(next);
+    storeSaved(next);
+    toast(`Deleted saved query "${query.name}"`);
   };
 
   return (
@@ -110,15 +132,27 @@ export function QueryDialog({
               </Button>
             ))}
             {saved.map((s) => (
-              <Button
-                key={s.name}
-                size="sm"
-                variant="outline"
-                onClick={() => setSql(s.sql)}
-                title={s.sql}
-              >
-                {s.name}
-              </Button>
+              <span key={s.name} className="inline-flex items-center rounded-md border">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="rounded-r-none"
+                  onClick={() => setSql(s.sql)}
+                  title={s.sql}
+                >
+                  {s.name}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="w-7 rounded-l-none px-0 text-muted-foreground"
+                  aria-label={`Delete saved query ${s.name}`}
+                  title="Delete"
+                  onClick={() => remove(s)}
+                >
+                  <X />
+                </Button>
+              </span>
             ))}
           </div>
           <textarea
@@ -126,7 +160,10 @@ export function QueryDialog({
             spellCheck={false}
             onChange={(e) => setSql(e.target.value)}
             onKeyDown={(e) => {
-              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") run();
+              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                e.preventDefault();
+                if (!running) void run();
+              }
             }}
             aria-label="SQL query"
             className="h-28 w-full resize-none rounded-md border bg-background p-2 font-mono text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"

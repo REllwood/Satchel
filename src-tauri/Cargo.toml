@@ -10,7 +10,9 @@ description = "Satchel desktop app: local-first Markdown notes"
 # The `_lib` suffix keeps the lib name distinct from the bin name (Windows quirk; see
 # https://github.com/rust-lang/cargo/issues/8519).
 name = "satchel_app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop only: the staticlib and cdylib types are for iOS and Android builds,
+# which Satchel does not ship, and would add a large unused library per build.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -22,6 +24,7 @@ serde_json = { workspace = true }
 satchel-core = { workspace = true }
 tauri-plugin-dialog = "2.7.1"
 trash = "5.2.9"
+same-file = "1.0.6"
 
 [dev-dependencies]
 # The mock runtime, to call commands through the real IPC layer in tests.

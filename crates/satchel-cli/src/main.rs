@@ -78,12 +78,20 @@ fn open_synced(root: &Path) -> Result<Connection> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let root = resolve_vault(cli.vault);
+    if matches!(cli.command, Command::Init) {
+        std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
+    }
+    // A mistyped path, or a cloud drive that is not mounted yet, must be an
+    // error, not an empty vault.
+    if !root.is_dir() {
+        bail!("notes folder not found: {}", root.display());
+    }
     vault::allow_cloud_downloads();
 
     match cli.command {
         Command::Init => {
-            let conn = open_synced(&root)?;
             agents::ensure_agent_docs(&root)?;
+            let conn = open_synced(&root)?;
             let count: i64 =
                 conn.query_row("SELECT count(*) FROM notes", [], |r| r.get(0))?;
             println!("Initialized vault at {} ({count} notes)", root.display());
@@ -95,6 +103,12 @@ fn main() -> Result<()> {
                 "Indexed {} notes (+{} ~{} -{})",
                 stats.total, stats.added, stats.updated, stats.removed
             );
+            if stats.moved > 0 {
+                println!("{} notes moved", stats.moved);
+            }
+            if stats.skipped > 0 {
+                eprintln!("{} notes could not be read and were skipped", stats.skipped);
+            }
         }
         Command::Search {
             query: q,
@@ -103,6 +117,7 @@ fn main() -> Result<()> {
             json,
         } => {
             let conn = open_synced(&root)?;
+            let limit = limit.clamp(1, semantic::MAX_LIMIT);
             let hits = if sem {
                 let embedder = embed::Embedder::from_dir(&embed::default_model_dir())
                     .context("loading embedding model")?;
@@ -143,13 +158,14 @@ fn main() -> Result<()> {
             }
         }
         Command::New { title } => {
-            let safe = title.replace(['/', '\\'], "-");
-            let rel = format!("{safe}.md");
+            let rel = format!("{}.md", vault::note_file_name(&title));
             let abs = vault::safe_join(&root, &rel)?;
-            if abs.exists() {
-                bail!("note already exists: {rel}");
+            match vault::create_file_exclusive(&abs, format!("# {title}\n\n").as_bytes()) {
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    bail!("note already exists: {rel}")
+                }
+                result => result?,
             }
-            vault::write_note_atomic(&abs, &format!("# {title}\n\n"))?;
             let conn = db::open(&db_path(&root))?;
             index::index_single(&conn, &root, &rel)?;
             println!("{rel}");

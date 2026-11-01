@@ -17,9 +17,13 @@ blake3 = "1.8.5"
 walkdir = "2.5.0"
 regex = "1.12.3"
 tempfile = "3.27.0"
-rusqlite = { version = "0.40.0", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.40.0", features = ["bundled", "hooks", "limits"] }
 sqlite-vec = "=0.1.9"
 fastembed = "5.15.0"
 notify = "8.2.0"
 notify-debouncer-full = "0.7.0"
 dirs = "7.0.0"
+icu_normalizer = { version = "2.2.0", default-features = false, features = ["compiled_data"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

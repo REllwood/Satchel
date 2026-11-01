@@ -4,16 +4,18 @@ import {
   type CompletionContext,
   type CompletionResult,
 } from "@codemirror/autocomplete";
-import { RangeSetBuilder } from "@codemirror/state";
+import { Prec, RangeSetBuilder } from "@codemirror/state";
 import {
   Decoration,
   type DecorationSet,
   EditorView,
+  keymap,
   ViewPlugin,
   type ViewUpdate,
 } from "@codemirror/view";
 
 import type { NoteMeta } from "@/lib/api";
+import { findHeading, linkAction, wikilinkAt } from "./link-target";
 
 export interface WikilinkOptions {
   /** Current notes (read fresh each call so completion stays up to date). */
@@ -96,10 +98,12 @@ function decorations(view: EditorView, opts: WikilinkOptions): DecorationSet {
       while ((m = WIKILINK_RE.exec(line.text))) {
         const start = line.from + m.index;
         const end = start + m[0].length;
+        // `[[#Heading]]` links within this note, so it has no target to resolve.
+        const target = targetOf(m[1]).toLowerCase();
+        const found =
+          !target || resolved.has(target) || resolved.has(target.replace(/\.md$/, ""));
         const mark = Decoration.mark({
-          class: resolved.has(targetOf(m[1]).toLowerCase())
-            ? "cm-wikilink"
-            : "cm-wikilink cm-wikilink-unresolved",
+          class: found ? "cm-wikilink" : "cm-wikilink cm-wikilink-unresolved",
         });
         if (active.has(line.number)) {
           builder.add(start, end, mark);
@@ -116,7 +120,38 @@ function decorations(view: EditorView, opts: WikilinkOptions): DecorationSet {
   return builder.finish();
 }
 
-/** Build the wikilink extension set: autocomplete, ⌘/Ctrl-click nav, styling. */
+/**
+ * Follow the `[[link]]` at `pos`. Returns false when there is no link there.
+ * `[[#Heading]]` jumps within this note, and a link to an attachment such as
+ * `[[doc.pdf]]` does nothing, so neither ever creates a note.
+ */
+function followLinkAt(
+  view: EditorView,
+  pos: number,
+  opts: WikilinkOptions,
+  inside = false,
+): boolean {
+  const line = view.state.doc.lineAt(pos);
+  const inner = wikilinkAt(line.text, pos - line.from, inside);
+  if (inner == null) return false;
+  const action = linkAction(inner);
+  if (action?.kind === "note") {
+    opts.onOpen(action.target);
+  } else if (action?.kind === "heading") {
+    const at = findHeading(view.state.doc.toString(), action.heading);
+    if (at != null) {
+      view.dispatch({
+        selection: { anchor: at },
+        effects: EditorView.scrollIntoView(at, { y: "start", yMargin: 24 }),
+        userEvent: "select",
+      });
+      view.focus();
+    }
+  }
+  return true;
+}
+
+/** Build the wikilink extension set: autocomplete, ⌘/Ctrl-click and Mod-Enter nav, styling. */
 export function wikilinkExtension(opts: WikilinkOptions) {
   const styler = ViewPlugin.fromClass(
     class {
@@ -137,26 +172,27 @@ export function wikilinkExtension(opts: WikilinkOptions) {
     mousedown(event, view) {
       if (!(event.metaKey || event.ctrlKey)) return false;
       const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
-      if (pos == null) return false;
-      const line = view.state.doc.lineAt(pos);
-      WIKILINK_RE.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      while ((m = WIKILINK_RE.exec(line.text))) {
-        const start = line.from + m.index;
-        const end = start + m[0].length;
-        if (pos >= start && pos <= end) {
-          event.preventDefault();
-          opts.onOpen(targetOf(m[1]));
-          return true;
-        }
-      }
-      return false;
+      if (pos == null || !followLinkAt(view, pos, opts)) return false;
+      event.preventDefault();
+      return true;
     },
   });
+
+  // Ahead of the default keymap, whose Mod-Enter inserts a blank line. That
+  // still happens when the cursor is not in a link.
+  const keyboardFollow = Prec.high(
+    keymap.of([
+      {
+        key: "Mod-Enter",
+        run: (view) => followLinkAt(view, view.state.selection.main.head, opts, true),
+      },
+    ]),
+  );
 
   return [
     autocompletion({ override: [completionSource(opts)] }),
     styler,
     clickToOpen,
+    keyboardFollow,
   ];
 }

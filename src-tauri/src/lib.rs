@@ -2,7 +2,8 @@
 //! lives in the core. See `commands.rs` for the command surface.
 
 mod commands;
-#[cfg(test)]
+// Not on Windows: see the dev-dependencies note in Cargo.toml.
+#[cfg(all(test, not(windows)))]
 mod ipc_tests;
 mod state;
 

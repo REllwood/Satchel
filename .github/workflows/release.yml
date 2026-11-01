@@ -54,11 +54,19 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           notes="Download the installer for your platform below. macOS builds need Apple silicon and macOS 13.4 or later. See the README for first-launch steps."
-          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
-              --title "Satchel $TAG" --notes "$notes"
+          # Reuse this tag's release (a draft from an earlier run) if there is
+          # one. Otherwise create the draft and take its id from the reply: a
+          # new draft can take a moment to appear in the release list.
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -1)
+          if [ -z "$id" ]; then
+            id=$(gh api "repos/$GITHUB_REPOSITORY/releases" -f tag_name="$TAG" \
+              -f name="Satchel $TAG" -f body="$notes" -F draft=true --jq .id)
           fi
-          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -1)
+          if [ -z "$id" ]; then
+            echo "::error::Could not find or create the release for $TAG"
+            exit 1
+          fi
           echo "release_id=$id" >> "$GITHUB_OUTPUT"
 
   build:

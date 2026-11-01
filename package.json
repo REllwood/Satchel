@@ -1,7 +1,7 @@
 {
   "name": "satchel",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local-first notes that sync through your own iCloud Drive or Google Drive folder.",
   "license": "MIT",
   "repository": {

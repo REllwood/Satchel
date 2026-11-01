@@ -15,39 +15,68 @@ pub fn ensure_semantic(conn: &Connection, dim: u32) -> Result<()> {
     vec::create_vec_table(conn, dim)
 }
 
-/// (Re)embed a single note's chunks into `chunks` + `vec_chunks`.
-/// Returns the number of chunks embedded.
-pub fn index_note_embeddings(conn: &Connection, embedder: &Embedder, note_id: i64) -> Result<usize> {
-    let row: Option<(String, bool)> = conn
+/// A note's text split into chunks, ready to embed. Embedding is the slow
+/// part, so a caller sharing the connection can prepare a job, release the
+/// connection while it runs [`EmbeddingJob::texts`] through the model, then
+/// store the vectors with [`store_note_embeddings`].
+pub struct EmbeddingJob {
+    pub note_id: i64,
+    /// Content hash when prepared, so vectors of outdated text are never stored.
+    hash: String,
+    chunks: Vec<embed::Chunk>,
+}
+
+impl EmbeddingJob {
+    /// The texts to embed, one per chunk.
+    pub fn texts(&self) -> Vec<String> {
+        self.chunks.iter().map(|c| c.text.clone()).collect()
+    }
+}
+
+/// Read a note and chunk it for embedding. `None` if the note no longer exists.
+/// A note whose contents are only in the cloud gets a job with no chunks.
+pub fn prepare_note_embeddings(conn: &Connection, note_id: i64) -> Result<Option<EmbeddingJob>> {
+    let row: Option<(String, String, bool)> = conn
         .query_row(
-            "SELECT body, materialized FROM notes WHERE id = ?1",
+            "SELECT body, hash, materialized FROM notes WHERE id = ?1",
             [note_id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
         )
         .optional()?;
-    let Some((body, materialized)) = row else {
-        return Ok(0);
+    let Some((body, hash, materialized)) = row else {
+        return Ok(None);
     };
+    let chunks = if materialized {
+        embed::chunk_text(&body)
+    } else {
+        Vec::new()
+    };
+    Ok(Some(EmbeddingJob { note_id, hash, chunks }))
+}
+
+/// Replace a note's chunks and vectors with a job's results. Returns false,
+/// storing nothing, if the note changed or was removed after the job was
+/// prepared. A changed note is left pending, so a later pass embeds its new text.
+pub fn store_note_embeddings(
+    conn: &Connection,
+    job: &EmbeddingJob,
+    vectors: &[Vec<f32>],
+) -> Result<bool> {
+    let hash: Option<String> = conn
+        .query_row("SELECT hash FROM notes WHERE id = ?1", [job.note_id], |r| r.get(0))
+        .optional()?;
+    if hash.as_deref() != Some(job.hash.as_str()) {
+        return Ok(false);
+    }
 
     // Clear any previous chunks/vectors for this note.
-    vec::delete_note_vectors(conn, note_id)?;
-    conn.execute("DELETE FROM chunks WHERE note_id = ?1", [note_id])?;
+    vec::delete_note_vectors(conn, job.note_id)?;
+    conn.execute("DELETE FROM chunks WHERE note_id = ?1", [job.note_id])?;
 
-    if !materialized {
-        return Ok(0);
-    }
-    let chunks = embed::chunk_text(&body);
-    if chunks.is_empty() {
-        return Ok(0);
-    }
-
-    let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
-    let vectors = embedder.embed(&texts)?;
-
-    for (chunk, vector) in chunks.iter().zip(vectors.iter()) {
+    for (chunk, vector) in job.chunks.iter().zip(vectors.iter()) {
         let chunk_id: i64 = conn.query_row(
             "INSERT INTO chunks (note_id, ord, start, \"end\", text) VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
-            params![note_id, chunk.ord as i64, chunk.start as i64, chunk.end as i64, chunk.text],
+            params![job.note_id, chunk.ord as i64, chunk.start as i64, chunk.end as i64, chunk.text],
             |r| r.get(0),
         )?;
         conn.execute(
@@ -55,7 +84,18 @@ pub fn index_note_embeddings(conn: &Connection, embedder: &Embedder, note_id: i6
             params![chunk_id, vec::f32_blob(vector)],
         )?;
     }
-    Ok(chunks.len())
+    Ok(true)
+}
+
+/// (Re)embed a single note's chunks into `chunks` + `vec_chunks`.
+/// Returns the number of chunks embedded.
+pub fn index_note_embeddings(conn: &Connection, embedder: &Embedder, note_id: i64) -> Result<usize> {
+    let Some(job) = prepare_note_embeddings(conn, note_id)? else {
+        return Ok(0);
+    };
+    let vectors = embedder.embed(&job.texts())?;
+    store_note_embeddings(conn, &job, &vectors)?;
+    Ok(job.chunks.len())
 }
 
 /// Embed every materialized note. Returns total chunks embedded.
@@ -292,6 +332,33 @@ mod tests {
 
         index_note_embeddings(&conn, &embedder, finance).unwrap();
         assert!(pending_notes(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn job_is_stored_only_if_the_note_is_unchanged() {
+        let (dir, conn, embedder) = setup();
+        let finance = index::note_id_by_path(&conn, "finance.md").unwrap().unwrap();
+        let edit = |text: &str| {
+            fs::write(dir.path().join("finance.md"), text).unwrap();
+            index::index_single(&conn, dir.path(), "finance.md").unwrap();
+        };
+
+        // The note is edited again while its previous text is being embedded.
+        edit("# Finance\n\nfirst revision");
+        let stale = prepare_note_embeddings(&conn, finance).unwrap().unwrap();
+        let stale_vectors = embedder.embed(&stale.texts()).unwrap();
+        edit("# Finance\n\nsecond, longer revision");
+        assert!(!store_note_embeddings(&conn, &stale, &stale_vectors).unwrap());
+        assert_eq!(pending_notes(&conn).unwrap(), vec![finance]);
+
+        let job = prepare_note_embeddings(&conn, finance).unwrap().unwrap();
+        let vectors = embedder.embed(&job.texts()).unwrap();
+        assert!(store_note_embeddings(&conn, &job, &vectors).unwrap());
+        assert!(pending_notes(&conn).unwrap().is_empty());
+        let stored: String = conn
+            .query_row("SELECT text FROM chunks WHERE note_id = ?1", [finance], |r| r.get(0))
+            .unwrap();
+        assert!(stored.contains("second, longer revision"), "got {stored:?}");
     }
 
     #[test]

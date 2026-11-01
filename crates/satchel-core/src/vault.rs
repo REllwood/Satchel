@@ -91,7 +91,8 @@ fn icloud_real_name(name: &str) -> Option<&str> {
     name.strip_prefix('.')?.strip_suffix(".icloud")
 }
 
-fn is_markdown(name: &str) -> bool {
+/// True for a Markdown note path or file name (`.md`, any case).
+pub fn is_markdown(name: &str) -> bool {
     name.rsplit('.')
         .next()
         .map(|ext| ext.eq_ignore_ascii_case("md"))

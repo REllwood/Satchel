@@ -8,6 +8,7 @@ import { useVault } from "@/features/vault/vault-store";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { wikilinkExtension } from "./wikilink";
 import { registerFlush } from "./pending-save";
+import { DiskSync } from "./disk-sync";
 
 type SaveState = "idle" | "saving" | "saved";
 
@@ -40,31 +41,46 @@ export function Editor() {
   // The unsaved edit, tied to the note it belongs to, and its debounce timer.
   const pending = useRef<{ path: string; body: string } | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Saves run one at a time, in order, so an older save can never land last.
+  const saves = useRef<Promise<void>>(Promise.resolve());
+  const diskSync = useRef(new DiskSync());
 
-  /** Write the pending edit now (to the note it was typed in). */
-  const flush = useCallback(async () => {
+  /** Write the pending edit (to the note it was typed in) after any earlier save. */
+  const flush = useCallback((): Promise<void> => {
     if (timer.current) {
       clearTimeout(timer.current);
       timer.current = null;
     }
     const edit = pending.current;
-    if (!edit) return;
+    if (!edit) return saves.current;
     pending.current = null;
-    try {
-      await api.writeNote(edit.path, edit.body);
-      if (activePath.current === edit.path && !pending.current) {
-        setSave("saved");
-        setDirty(false);
+    diskSync.current.saving(edit.path, edit.body);
+    saves.current = saves.current.then(async () => {
+      let ok = false;
+      try {
+        await api.writeNote(edit.path, edit.body);
+        ok = true;
+        if (activePath.current === edit.path && !pending.current) {
+          setSave("saved");
+          setDirty(false);
+        }
+      } catch (e) {
+        toast.error(`Save failed: ${e}`);
+        pending.current ??= edit; // keep it for the next attempt
+        if (activePath.current === edit.path) setSave("idle");
+      } finally {
+        diskSync.current.saved(edit.path, edit.body, ok);
       }
-    } catch (e) {
-      toast.error(`Save failed: ${e}`);
-      pending.current ??= edit; // keep it for the next attempt
-      if (activePath.current === edit.path) setSave("idle");
-    }
+    });
+    return saves.current;
   }, []);
 
   const onEdit = useCallback(
     (path: string, body: string) => {
+      // Update the mirrors now: a disk change handled before the next render
+      // must not mistake this keystroke for a clean editor.
+      contentRef.current = body;
+      dirtyRef.current = true;
       setContent(body);
       setDirty(true);
       setSave("saving");
@@ -90,6 +106,7 @@ export function Editor() {
       .readNote(selected)
       .then((n) => {
         if (cancelled || activePath.current !== selected) return;
+        diskSync.current.opened(selected, n.content);
         setContent(n.content);
         setLoadedFor(selected);
         setDirty(false);
@@ -132,8 +149,14 @@ export function Editor() {
         }
         try {
           const disk = (await api.readNote(path)).content;
-          if (disk === contentRef.current) return; // our own save — no-op
-          if (!dirtyRef.current) {
+          const change = diskSync.current.diskChanged(
+            path,
+            disk,
+            contentRef.current,
+            dirtyRef.current,
+          );
+          if (change === "ignore") return; // our own save, or nothing new
+          if (change === "reload") {
             setContent(disk); // no local edits: silently load the new version
             return;
           }

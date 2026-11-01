@@ -299,26 +299,46 @@ pub fn resolve_links(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Index (or remove, if gone) a single note by relative path, then re-resolve
-/// links. Used after in-app edits and by the file watcher.
-pub fn index_single(conn: &Connection, root: &Path, rel_path: &str) -> Result<Option<i64>> {
+/// Index (or remove, if gone) one note without re-resolving links. Paths that
+/// are not notes, such as canvases, are ignored.
+fn index_path(conn: &Connection, root: &Path, rel_path: &str) -> Result<Option<i64>> {
+    if !vault::is_markdown(rel_path) {
+        return Ok(None);
+    }
     let abs = root.join(rel_path);
-    let id = if abs.is_file() {
-        let meta = std::fs::metadata(&abs)?;
-        let scanned = ScannedNote {
-            rel_path: rel_path.to_string(),
-            abs_path: abs,
-            materialized: !vault::is_dataless(&meta),
-            mtime_ms: vault::mtime_ms(&meta),
-            size: meta.len(),
-        };
-        Some(index_note(conn, &scanned)?)
-    } else {
+    if !abs.is_file() {
         remove_note(conn, rel_path)?;
-        None
+        return Ok(None);
+    }
+    let meta = std::fs::metadata(&abs)?;
+    let scanned = ScannedNote {
+        rel_path: rel_path.to_string(),
+        abs_path: abs,
+        materialized: !vault::is_dataless(&meta),
+        mtime_ms: vault::mtime_ms(&meta),
+        size: meta.len(),
     };
-    resolve_links(conn)?;
+    Ok(Some(index_note(conn, &scanned)?))
+}
+
+/// Index (or remove, if gone) a single note by relative path, then re-resolve
+/// links. Used after in-app edits. Returns `None` for a path that is not a note.
+pub fn index_single(conn: &Connection, root: &Path, rel_path: &str) -> Result<Option<i64>> {
+    let id = index_path(conn, root, rel_path)?;
+    if vault::is_markdown(rel_path) {
+        resolve_links(conn)?;
+    }
     Ok(id)
+}
+
+/// Index a batch of changed paths, such as one file watcher report, then
+/// re-resolve links once. A path that fails to index (for example, a file
+/// removed mid-read) is skipped so it cannot hold up the rest of the batch.
+pub fn index_paths<S: AsRef<str>>(conn: &Connection, root: &Path, rel_paths: &[S]) -> Result<()> {
+    for rel_path in rel_paths {
+        let _ = index_path(conn, root, rel_path.as_ref());
+    }
+    resolve_links(conn)
 }
 
 /// Full reconcile: index every note in the vault, drop notes that vanished,
@@ -467,6 +487,52 @@ mod tests {
             )
             .unwrap();
         assert_eq!(resolved, 0);
+    }
+
+    fn note_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT count(*) FROM notes", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn canvas_files_are_never_indexed_as_notes() {
+        let (dir, conn) = fixture();
+        reindex_all(&conn, dir.path()).unwrap();
+        fs::write(
+            dir.path().join("board.canvas"),
+            r#"{"nodes":[{"id":"a","type":"text","text":"hi","x":0,"y":0,"width":10,"height":10}],"edges":[]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(index_single(&conn, dir.path(), "board.canvas").unwrap(), None);
+        index_paths(&conn, dir.path(), &["board.canvas"]).unwrap();
+        assert_eq!(note_count(&conn), 2);
+    }
+
+    #[test]
+    fn index_paths_applies_a_whole_batch() {
+        let (dir, conn) = fixture();
+        reindex_all(&conn, dir.path()).unwrap();
+
+        // One sync batch: beta deleted, gamma added, alpha now links to gamma.
+        fs::remove_file(dir.path().join("beta.md")).unwrap();
+        fs::write(dir.path().join("gamma.md"), "# Gamma").unwrap();
+        fs::write(dir.path().join("alpha.md"), "# Alpha\n\nsee [[Gamma]]").unwrap();
+        index_paths(&conn, dir.path(), &["beta.md", "gamma.md", "alpha.md", "missing.md"])
+            .unwrap();
+
+        let paths: Vec<String> = conn
+            .prepare("SELECT rel_path FROM notes ORDER BY rel_path")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(paths, vec!["alpha.md", "gamma.md"]);
+        let resolved: i64 = conn
+            .query_row("SELECT resolved FROM links WHERE target = 'Gamma'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(resolved, 1, "links resolve against the whole batch");
     }
 
     fn body_of(conn: &Connection, id: i64) -> (String, i64) {

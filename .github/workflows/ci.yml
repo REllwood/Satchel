@@ -7,8 +7,10 @@ on:
   # The release workflow runs these checks before building installers.
   workflow_call:
 
+# Keyed by the calling workflow too, so the release workflow's test run and a
+# normal CI run on the same branch do not cancel each other.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

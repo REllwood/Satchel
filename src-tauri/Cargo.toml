@@ -22,3 +22,8 @@ serde_json = { workspace = true }
 satchel-core = { workspace = true }
 tauri-plugin-dialog = "2.7.1"
 trash = "5.2.9"
+
+[dev-dependencies]
+# The mock runtime, to call commands through the real IPC layer in tests.
+tauri = { version = "2", features = ["test"] }
+tempfile = "3.27.0"

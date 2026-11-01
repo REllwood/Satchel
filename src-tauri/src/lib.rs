@@ -2,6 +2,8 @@
 //! lives in the core. See `commands.rs` for the command surface.
 
 mod commands;
+#[cfg(test)]
+mod ipc_tests;
 mod state;
 
 use std::ffi::OsString;

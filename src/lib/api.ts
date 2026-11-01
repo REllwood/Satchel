@@ -88,6 +88,9 @@ export interface TagCount {
   count: number;
 }
 
+// Tauri matches command arguments by their camelCase names (`rel_path` in Rust
+// is `relPath` here). api.test.ts checks every call follows this.
+
 // ---- vault lifecycle -------------------------------------------------------
 export const detectSyncLocations = () =>
   invoke<SyncLocation[]>("detect_sync_locations");
@@ -112,31 +115,31 @@ export const agentSetup = () => invoke<AgentSetup>("agent_setup");
 
 // ---- folders (notebooks) ---------------------------------------------------
 export const listFolders = () => invoke<string[]>("list_folders");
-export const createFolder = (rel_path: string) =>
-  invoke<void>("create_folder", { rel_path });
+export const createFolder = (relPath: string) =>
+  invoke<void>("create_folder", { relPath });
 export const renameFolder = (from: string, to: string) =>
   invoke<void>("rename_folder", { from, to });
-export const deleteFolder = (rel_path: string) =>
-  invoke<void>("delete_folder", { rel_path });
+export const deleteFolder = (relPath: string) =>
+  invoke<void>("delete_folder", { relPath });
 
 // ---- notes -----------------------------------------------------------------
 export const listNotes = () => invoke<NoteMeta[]>("list_notes");
-export const readNote = (rel_path: string) =>
-  invoke<NoteContent>("read_note", { rel_path });
-export const writeNote = (rel_path: string, content: string) =>
-  invoke<void>("write_note", { rel_path, content });
-export const createNote = (rel_path: string, content?: string) =>
-  invoke<string>("create_note", { rel_path, content: content ?? null });
+export const readNote = (relPath: string) =>
+  invoke<NoteContent>("read_note", { relPath });
+export const writeNote = (relPath: string, content: string) =>
+  invoke<void>("write_note", { relPath, content });
+export const createNote = (relPath: string, content?: string) =>
+  invoke<string>("create_note", { relPath, content: content ?? null });
 export const renameNote = (from: string, to: string) =>
   invoke<void>("rename_note", { from, to });
-export const deleteNote = (rel_path: string) =>
-  invoke<void>("delete_note", { rel_path });
+export const deleteNote = (relPath: string) =>
+  invoke<void>("delete_note", { relPath });
 
 // ---- attachments -----------------------------------------------------------
 export const saveAttachment = (bytes: number[], ext: string) =>
   invoke<string>("save_attachment", { bytes, ext });
-export const readAttachment = (rel_path: string) =>
-  invoke<number[]>("read_attachment", { rel_path });
+export const readAttachment = (relPath: string) =>
+  invoke<number[]>("read_attachment", { relPath });
 
 // ---- canvas (JSONCanvas) ---------------------------------------------------
 export interface CanvasNode {
@@ -166,12 +169,12 @@ export interface Canvas {
   edges: CanvasEdge[];
 }
 export const listCanvases = () => invoke<string[]>("list_canvases");
-export const readCanvas = (rel_path: string) =>
-  invoke<Canvas>("read_canvas", { rel_path });
-export const writeCanvas = (rel_path: string, canvas: Canvas) =>
-  invoke<void>("write_canvas", { rel_path, canvas });
-export const createCanvas = (rel_path: string) =>
-  invoke<string>("create_canvas", { rel_path });
+export const readCanvas = (relPath: string) =>
+  invoke<Canvas>("read_canvas", { relPath });
+export const writeCanvas = (relPath: string, canvas: Canvas) =>
+  invoke<void>("write_canvas", { relPath, canvas });
+export const createCanvas = (relPath: string) =>
+  invoke<string>("create_canvas", { relPath });
 
 // ---- search & query --------------------------------------------------------
 export const searchFulltext = (query: string, limit = 30) =>
@@ -180,12 +183,12 @@ export const searchSemantic = (query: string, limit = 30) =>
   invoke<SearchHit[]>("search_semantic", { query, limit });
 export const searchHybrid = (query: string, limit = 30) =>
   invoke<SearchHit[]>("search_hybrid", { query, limit });
-export const runQuery = (sql: string, max_rows = 500) =>
-  invoke<QueryResult>("run_query", { sql, max_rows });
+export const runQuery = (sql: string, maxRows = 500) =>
+  invoke<QueryResult>("run_query", { sql, maxRows });
 
 // ---- links, graph, tags ----------------------------------------------------
-export const getBacklinks = (rel_path: string) =>
-  invoke<Backlink[]>("get_backlinks", { rel_path });
+export const getBacklinks = (relPath: string) =>
+  invoke<Backlink[]>("get_backlinks", { relPath });
 export const getGraph = () => invoke<GraphData>("get_graph");
 export const getTags = () => invoke<TagCount[]>("get_tags");
 export const notesForTag = (tag: string) =>

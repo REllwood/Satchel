@@ -3,7 +3,8 @@
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use satchel_core::canvas::{self, Canvas};
 use satchel_core::cloud::{self, Provider, SyncLocation};
@@ -111,7 +112,7 @@ fn with_vault<T>(
 /// semantic search works — returning partial results while indexing runs.
 fn ensure_semantic_ready(vault: &mut Vault, model_dir: &Path) -> Result<(), String> {
     if vault.embedder.is_none() {
-        vault.embedder = Some(Embedder::from_dir(model_dir).map_err(es)?);
+        vault.embedder = Some(Arc::new(Embedder::from_dir(model_dir).map_err(es)?));
     }
     let dim = vault.embedder.as_ref().map(|e| e.dim()).unwrap_or(0) as u32;
     semantic::ensure_semantic(&vault.conn, dim).map_err(es)
@@ -167,22 +168,25 @@ fn remember_last_vault(app: &AppHandle, root: &Path) {
 
 /// Watch for external edits (AI tools, other editors, cloud sync): reconcile
 /// the index and notify the frontend. Own-writes are idempotent re-indexes.
+/// Changed notes are embedded afterwards by the background indexer, so a big
+/// sync never holds the vault lock while the model runs.
 fn start_watcher(app: &AppHandle, root: &Path) -> Option<watch::WatchGuard> {
     let app = app.clone();
+    let watched = root.to_path_buf();
     watch::start(root, move |events| {
+        let mut embed = false;
         if let Some(state) = app.try_state::<AppState>() {
-            if let Ok(mut guard) = state.vault.lock() {
-                if let Some(v) = guard.as_mut() {
-                    for ev in &events {
-                        let _ = index::index_single(&v.conn, &v.root, &ev.rel_path);
-                        if let (false, Some(emb)) = (ev.removed, v.embedder.as_ref()) {
-                            if let Ok(Some(id)) = index::note_id_by_path(&v.conn, &ev.rel_path) {
-                                let _ = semantic::index_note_embeddings(&v.conn, emb, id);
-                            }
-                        }
-                    }
+            if let Ok(guard) = state.vault.lock() {
+                // Drop a late batch from a vault that has since been closed.
+                if let Some(v) = guard.as_ref().filter(|v| v.root == watched) {
+                    let paths: Vec<&str> = events.iter().map(|e| e.rel_path.as_str()).collect();
+                    let _ = index::index_paths(&v.conn, &v.root, &paths);
+                    embed = v.embedder.is_some();
                 }
             }
+        }
+        if embed {
+            spawn_semantic_indexer(app.clone());
         }
         let _ = app.emit("vault-changed", events);
     })
@@ -302,25 +306,71 @@ pub fn reindex(state: State<AppState>) -> Result<IndexStats, String> {
 
 // ---- semantic indexing -----------------------------------------------------
 
-/// Start the background semantic indexer (no-op if already running). It
-/// embeds one note at a time, releasing the vault lock between notes, so the
-/// UI stays responsive on large vaults. Progress is emitted as `embed-status`.
+/// Runs of the background indexer that finish sooner than this, such as
+/// re-embedding the note that was just saved, never show progress.
+const SHOW_PROGRESS_AFTER: Duration = Duration::from_millis(750);
+
+/// Progress reporting for one run of the background indexer (event `embed-status`).
+struct Progress {
+    started: Instant,
+    shown: bool,
+}
+
+impl Progress {
+    fn report(&mut self, app: &AppHandle, done: usize, total: usize) {
+        let too_soon = self.started.elapsed() < SHOW_PROGRESS_AFTER;
+        if too_soon || (self.shown && !done.is_multiple_of(10)) {
+            return;
+        }
+        self.shown = true;
+        let _ = app.emit(
+            "embed-status",
+            EmbedStatus { running: true, done, total, error: None },
+        );
+    }
+}
+
+/// Ask the background semantic indexer to embed every note that needs it. It
+/// starts if idle, or else runs another pass when its current one finishes.
+/// It embeds one note at a time and runs the model without holding the vault
+/// lock, so saves, searches and the rest of the UI stay responsive.
 pub fn spawn_semantic_indexer(app: AppHandle) {
-    if app.state::<AppState>().embedding.swap(true, Ordering::SeqCst) {
+    if !app.state::<AppState>().embed_queue.request() {
         return;
     }
     std::thread::spawn(move || {
-        let result = run_semantic_indexer(&app);
-        app.state::<AppState>().embedding.store(false, Ordering::SeqCst);
+        let state = app.state::<AppState>();
+        let mut progress = Progress { started: Instant::now(), shown: false };
+        let result = loop {
+            state.embed_queue.begin_pass();
+            match run_semantic_indexer(&app, &mut progress) {
+                Err(e) => {
+                    state.embed_queue.stop();
+                    break Err(e);
+                }
+                Ok(counts) => {
+                    if !state.embed_queue.end_pass() {
+                        break Ok(counts);
+                    }
+                }
+            }
+        };
         let status = match result {
             Ok((done, total)) => EmbedStatus { running: false, done, total, error: None },
             Err(e) => EmbedStatus { running: false, done: 0, total: 0, error: Some(e) },
         };
-        let _ = app.emit("embed-status", status);
+        // A quick run never showed progress, so there is nothing to clear.
+        if progress.shown || status.error.is_some() {
+            let _ = app.emit("embed-status", status);
+        }
     });
 }
 
-fn run_semantic_indexer(app: &AppHandle) -> Result<(usize, usize), String> {
+/// One pass: embed every note that has content but no embeddings yet.
+fn run_semantic_indexer(
+    app: &AppHandle,
+    progress: &mut Progress,
+) -> Result<(usize, usize), String> {
     let state = app.state::<AppState>();
     let (root, needs_model) = {
         let guard = state.vault.lock().map_err(|_| "state poisoned")?;
@@ -333,7 +383,7 @@ fn run_semantic_indexer(app: &AppHandle) -> Result<(usize, usize), String> {
         let mut guard = state.vault.lock().map_err(|_| "state poisoned")?;
         if let Some(v) = guard.as_mut().filter(|v| v.root == root) {
             if v.embedder.is_none() {
-                v.embedder = Some(embedder);
+                v.embedder = Some(Arc::new(embedder));
             }
         }
     }
@@ -346,26 +396,31 @@ fn run_semantic_indexer(app: &AppHandle) -> Result<(usize, usize), String> {
         semantic::pending_notes(&v.conn).map_err(es)?
     };
     let total = pending.len();
-    let _ = app.emit(
-        "embed-status",
-        EmbedStatus { running: true, done: 0, total, error: None },
-    );
     for (i, id) in pending.into_iter().enumerate() {
-        {
+        // Read the note under the lock...
+        let (embedder, job) = {
             let guard = state.vault.lock().map_err(|_| "state poisoned")?;
             let Some(v) = guard.as_ref().filter(|v| v.root == root) else {
                 return Ok((i, total)); // vault switched or closed
             };
-            if let Some(embedder) = v.embedder.as_ref() {
-                let _ = semantic::index_note_embeddings(&v.conn, embedder, id);
+            let Some(embedder) = v.embedder.clone() else {
+                return Ok((i, total));
+            };
+            (embedder, semantic::prepare_note_embeddings(&v.conn, id))
+        };
+        // ...run the model without it...
+        if let Ok(Some(job)) = job {
+            if let Ok(vectors) = embedder.embed(&job.texts()) {
+                // ...and keep the result only if the note did not change meanwhile.
+                let guard = state.vault.lock().map_err(|_| "state poisoned")?;
+                if let Some(v) = guard.as_ref().filter(|v| v.root == root) {
+                    let _ = semantic::store_note_embeddings(&v.conn, &job, &vectors);
+                }
             }
         }
         let done = i + 1;
-        if done % 10 == 0 || done == total {
-            let _ = app.emit(
-                "embed-status",
-                EmbedStatus { running: true, done, total, error: None },
-            );
+        if done < total {
+            progress.report(app, done, total);
         }
     }
     Ok((total, total))
@@ -374,7 +429,7 @@ fn run_semantic_indexer(app: &AppHandle) -> Result<(usize, usize), String> {
 /// Rebuild all embeddings from scratch (in the background).
 #[tauri::command(async)]
 pub fn embed_vault(app: AppHandle, state: State<AppState>) -> Result<(), String> {
-    if state.embedding.load(Ordering::SeqCst) {
+    if state.embed_queue.is_running() {
         return Err("Semantic indexing is already running".into());
     }
     with_vault(&state, |v| {
@@ -471,32 +526,41 @@ pub fn read_note(state: State<AppState>, rel_path: String) -> Result<NoteContent
     Ok(NoteContent { rel_path, content })
 }
 
-fn reindex_one(v: &mut Vault, rel_path: &str) -> Result<(), String> {
+/// Re-index one note after an in-app change. Returns true when its embeddings
+/// need refreshing (semantic search is loaded this session), which the caller
+/// leaves to the background indexer so a save never waits on the model.
+fn reindex_one(v: &mut Vault, rel_path: &str) -> Result<bool, String> {
     let root = v.root.clone();
-    let id = index::index_single(&v.conn, &root, rel_path).map_err(es)?;
-    // Keep embeddings current if they've been built this session.
-    if let (Some(embedder), Some(id)) = (v.embedder.as_ref(), id) {
-        semantic::index_note_embeddings(&v.conn, embedder, id).map_err(es)?;
+    index::index_single(&v.conn, &root, rel_path).map_err(es)?;
+    Ok(v.embedder.is_some())
+}
+
+#[tauri::command(async)]
+pub fn write_note(
+    app: AppHandle,
+    state: State<AppState>,
+    rel_path: String,
+    content: String,
+) -> Result<(), String> {
+    let embed = with_vault(&state, |v| {
+        let abs = vault::safe_join(&v.root, &rel_path).map_err(es)?;
+        vault::write_note_atomic(&abs, &content).map_err(es)?;
+        reindex_one(v, &rel_path)
+    })?;
+    if embed {
+        spawn_semantic_indexer(app);
     }
     Ok(())
 }
 
 #[tauri::command(async)]
-pub fn write_note(state: State<AppState>, rel_path: String, content: String) -> Result<(), String> {
-    with_vault(&state, |v| {
-        let abs = vault::safe_join(&v.root, &rel_path).map_err(es)?;
-        vault::write_note_atomic(&abs, &content).map_err(es)?;
-        reindex_one(v, &rel_path)
-    })
-}
-
-#[tauri::command(async)]
 pub fn create_note(
+    app: AppHandle,
     state: State<AppState>,
     rel_path: String,
     content: Option<String>,
 ) -> Result<String, String> {
-    with_vault(&state, |v| {
+    let (final_rel, embed) = with_vault(&state, |v| {
         // Reject traversal/absolute up front; derived names below stay safe.
         vault::safe_join(&v.root, &rel_path).map_err(es)?;
         // Ensure a unique path: "Untitled.md" -> "Untitled 1.md" ...
@@ -518,16 +582,25 @@ pub fn create_note(
         let body = content.unwrap_or_else(|| format!("# {title}\n\n"));
         let abs = vault::safe_join(&v.root, &final_rel).map_err(es)?;
         vault::write_note_atomic(&abs, &body).map_err(es)?;
-        reindex_one(v, &final_rel)?;
-        Ok(final_rel)
-    })
+        let embed = reindex_one(v, &final_rel)?;
+        Ok((final_rel, embed))
+    })?;
+    if embed {
+        spawn_semantic_indexer(app);
+    }
+    Ok(final_rel)
 }
 
 #[tauri::command(async)]
-pub fn rename_note(state: State<AppState>, from: String, to: String) -> Result<(), String> {
+pub fn rename_note(
+    app: AppHandle,
+    state: State<AppState>,
+    from: String,
+    to: String,
+) -> Result<(), String> {
     require_subpath(&from)?;
     require_subpath(&to)?;
-    with_vault(&state, |v| {
+    let embed = with_vault(&state, |v| {
         let abs_from = vault::safe_join(&v.root, &from).map_err(es)?;
         let abs_to = vault::safe_join(&v.root, &to).map_err(es)?;
         if !abs_from.is_file() {
@@ -543,7 +616,11 @@ pub fn rename_note(state: State<AppState>, from: String, to: String) -> Result<(
         fs::rename(&abs_from, &abs_to).map_err(es)?;
         index::remove_note(&v.conn, &from).map_err(es)?;
         reindex_one(v, &to)
-    })
+    })?;
+    if embed {
+        spawn_semantic_indexer(app); // the renamed note has a new id
+    }
+    Ok(())
 }
 
 /// Move a note to the system Trash (recoverable), then drop it from the index.
@@ -558,7 +635,8 @@ pub fn delete_note(state: State<AppState>, rel_path: String) -> Result<(), Strin
         if abs.is_file() {
             move_to_trash(&abs)?;
         }
-        reindex_one(v, &rel_path)
+        reindex_one(v, &rel_path)?;
+        Ok(())
     })
 }
 

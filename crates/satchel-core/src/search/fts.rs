@@ -5,14 +5,8 @@ use rusqlite::Connection;
 
 use super::{HitSource, SearchHit};
 
-/// Turn arbitrary user input into a safe FTS5 MATCH expression: keep
-/// alphanumerics (Unicode) and spaces, treat the rest as separators, and make
-/// the final term a prefix match for as-you-type behaviour. Every term must
-/// match.
-pub fn sanitize_query(input: &str) -> String {
-    match_expr(&terms(input), " ")
-}
-
+/// Split user input into search terms: alphanumerics (Unicode) are kept and
+/// everything else separates terms, so no input can inject FTS5 syntax.
 fn terms(input: &str) -> Vec<String> {
     input
         .chars()

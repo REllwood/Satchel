@@ -124,9 +124,9 @@ side panel, a tag filter, and light and dark themes that follow your OS. Shortcu
 <img align="right" width="420" src=".github/assets/settings.png" alt="Settings with copy buttons for Claude Code and Codex">
 
 The Satchel app is also an MCP server, with these tools: `search_notes`, `semantic_search`,
-`list_notes`, `read_note`, `create_note`, `list_tags` and `run_query` (read-only). You don't need to
-install anything else. In **Settings**, the Claude Code and Codex rows copy the exact setup for your
-computer.
+`list_notes`, `read_note`, `create_note`, `edit_note`, `append_to_note`, `list_tags` and `run_query`
+(read-only). You do not need to install anything else. In **Settings**, the Claude Code and Codex
+rows copy the exact setup for your computer.
 
 ```bash
 claude mcp add --transport stdio satchel -- \

@@ -159,6 +159,16 @@ fn tool_specs() -> Value {
         } } },
         { "name": "read_note", "description": "Read a note's Markdown by vault-relative path (a .md note or .canvas file).", "inputSchema": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] } },
         { "name": "create_note", "description": "Create a note with a title and optional Markdown content, optionally in a folder. Fails if a note with that name exists.", "inputSchema": { "type": "object", "properties": { "title": { "type": "string" }, "content": { "type": "string" }, "folder": { "type": "string", "description": "vault-relative folder, created if missing" } }, "required": ["title"] } },
+        { "name": "edit_note", "description": "Replace a passage in an existing note (.md). old_text must match the note exactly, line breaks included, and appear only once unless replace_all is true. Read the note first.", "inputSchema": { "type": "object", "properties": {
+            "path": { "type": "string", "description": "vault-relative path of the note" },
+            "old_text": { "type": "string", "description": "the exact text to replace" },
+            "new_text": { "type": "string", "description": "the text to put in its place (empty to delete it)" },
+            "replace_all": { "type": "boolean", "description": "replace every occurrence (default false)" }
+        }, "required": ["path", "old_text", "new_text"] } },
+        { "name": "append_to_note", "description": "Add Markdown to the end of an existing note (.md), on a new line.", "inputSchema": { "type": "object", "properties": {
+            "path": { "type": "string", "description": "vault-relative path of the note" },
+            "content": { "type": "string" }
+        }, "required": ["path", "content"] } },
         { "name": "list_tags", "description": "List tags with note counts.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "run_query", "description": "Run a read-only SQL SELECT over the index (tables: notes, links, tags, attachments, chunks).", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" } }, "required": ["sql"] } }
     ])
@@ -276,6 +286,22 @@ fn call_tool(
             index::index_single(conn, root, &rel)?;
             one(rel)
         }
+        "edit_note" => {
+            let (rel, abs) = existing_note(root, str_arg(args, "path")?)?;
+            let all = args.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
+            let text = vault::read_note(&abs)?;
+            let (updated, count) = replace_text(&text, str_arg(args, "old_text")?, str_arg(args, "new_text")?, all)?;
+            vault::write_note_atomic(&abs, &updated)?;
+            index::index_single(conn, root, &rel)?;
+            one(format!("Edited {rel}: {count} {}.", if count == 1 { "replacement" } else { "replacements" }))
+        }
+        "append_to_note" => {
+            let (rel, abs) = existing_note(root, str_arg(args, "path")?)?;
+            let text = vault::read_note(&abs)?;
+            vault::write_note_atomic(&abs, &append_text(&text, str_arg(args, "content")?))?;
+            index::index_single(conn, root, &rel)?;
+            one(format!("Added to the end of {rel}."))
+        }
         "list_tags" => {
             let mut stmt =
                 conn.prepare("SELECT tag, count(*) c FROM tags GROUP BY tag ORDER BY c DESC, tag")?;
@@ -292,5 +318,104 @@ fn call_tool(
             one(serde_json::to_string_pretty(&result)?)
         }
         other => bail!("unknown tool: {other}"),
+    }
+}
+
+/// The note at vault-relative `rel` that an edit may change: an existing
+/// Markdown note inside the vault, outside hidden folders, named exactly as
+/// on disk (so the index row it updates is the note's own). Returns the path
+/// in its clean form and the absolute path. A note that iCloud Drive keeps
+/// only in the cloud is downloaded first.
+fn existing_note(root: &Path, rel: &str) -> Result<(String, std::path::PathBuf)> {
+    let rel = rel
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>()
+        .join("/");
+    if vault::is_hidden_path(&rel) || !vault::is_markdown(&rel) {
+        bail!("only notes (.md) outside hidden folders can be edited");
+    }
+    let abs = vault::safe_join(root, &rel)?;
+    vault::ensure_local(&abs, Duration::from_secs(20))?;
+    if !vault::exists_exactly(&abs) {
+        bail!("note not found: {rel} (paths are case-sensitive, see list_notes)");
+    }
+    Ok((rel, abs))
+}
+
+/// `text` with Windows line endings.
+fn crlf(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
+/// Replace `old` with `new` in `text`, returning the result and the number of
+/// replacements. `old` must occur exactly once unless `all` is set. Line
+/// breaks in `old` and `new` are taken in the note's own style (`\r\n` or
+/// `\n`), so an agent need not copy them exactly and the note keeps one style.
+fn replace_text(text: &str, old: &str, new: &str, all: bool) -> Result<(String, usize)> {
+    if old.is_empty() {
+        bail!("old_text is empty");
+    }
+    let style = |s: &str| if text.contains("\r\n") { crlf(s) } else { s.replace("\r\n", "\n") };
+    let styled = style(old);
+    // A note with mixed line endings may hold the passage only as written.
+    let old = if text.contains(styled.as_str()) { styled } else { old.to_string() };
+    let new = style(new);
+    match text.matches(old.as_str()).count() {
+        0 => bail!("old_text was not found in the note. Read the note again and copy the passage exactly."),
+        n if n > 1 && !all => bail!(
+            "old_text appears {n} times. Include more of the surrounding text so it is unique, or set replace_all."
+        ),
+        n => Ok((text.replace(old.as_str(), &new), n)),
+    }
+}
+
+/// `text` with `content` added on a new line at the end, keeping the note's
+/// line-ending style and ending with a line break.
+fn append_text(text: &str, content: &str) -> String {
+    let windows = text.contains("\r\n");
+    let eol = if windows { "\r\n" } else { "\n" };
+    let mut out = text.to_string();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push_str(eol);
+    }
+    out.push_str(&if windows { crlf(content) } else { content.to_string() });
+    if !out.ends_with('\n') {
+        out.push_str(eol);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replaces_a_unique_passage_only() {
+        let text = "# Plan\n\n- milk\n- eggs\n";
+        assert_eq!(replace_text(text, "- eggs", "- bread", false).unwrap(), ("# Plan\n\n- milk\n- bread\n".into(), 1));
+        assert!(replace_text(text, "- tea", "x", false).unwrap_err().to_string().contains("not found"));
+        assert!(replace_text(text, "- ", "* ", false).unwrap_err().to_string().contains("2 times"));
+        assert_eq!(replace_text(text, "- ", "* ", true).unwrap().1, 2);
+        assert!(replace_text(text, "", "x", false).is_err());
+    }
+
+    #[test]
+    fn keeps_windows_line_endings() {
+        let text = "# Plan\r\n\r\n- milk\r\n- eggs\r\n";
+        let (out, _) = replace_text(text, "- milk\n- eggs", "- milk\n- bread\n- jam", false).unwrap();
+        assert_eq!(out, "# Plan\r\n\r\n- milk\r\n- bread\r\n- jam\r\n");
+        let (out, _) = replace_text(text, "- milk\r\n", "", false).unwrap();
+        assert_eq!(out, "# Plan\r\n\r\n- eggs\r\n");
+        let (out, _) = replace_text("a\nb\n", "a\r\nb", "c\r\nd", false).unwrap();
+        assert_eq!(out, "c\nd\n", "and Unix ones");
+        assert_eq!(append_text(text, "- tea\n- jam"), format!("{text}- tea\r\n- jam\r\n"));
+    }
+
+    #[test]
+    fn appends_on_a_new_line() {
+        assert_eq!(append_text("# A\n\nlast line", "- new"), "# A\n\nlast line\n- new\n");
+        assert_eq!(append_text("# A\n", "\n## Log\n"), "# A\n\n## Log\n");
+        assert_eq!(append_text("", "first"), "first\n");
     }
 }

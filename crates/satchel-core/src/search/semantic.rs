@@ -62,6 +62,12 @@ pub fn store_note_embeddings(
     job: &EmbeddingJob,
     vectors: &[Vec<f32>],
 ) -> Result<bool> {
+    // The hash check and the writes form one transaction, so a note saved by
+    // another process in between cannot get the old text's vectors.
+    crate::db::atomically(conn, || replace_note_chunks(conn, job, vectors))
+}
+
+fn replace_note_chunks(conn: &Connection, job: &EmbeddingJob, vectors: &[Vec<f32>]) -> Result<bool> {
     let hash: Option<String> = conn
         .query_row("SELECT hash FROM notes WHERE id = ?1", [job.note_id], |r| r.get(0))
         .optional()?;
@@ -96,21 +102,6 @@ pub fn index_note_embeddings(conn: &Connection, embedder: &Embedder, note_id: i6
     let vectors = embedder.embed(&job.texts())?;
     store_note_embeddings(conn, &job, &vectors)?;
     Ok(job.chunks.len())
-}
-
-/// Embed every materialized note. Returns total chunks embedded.
-pub fn embed_all(conn: &Connection, embedder: &Embedder) -> Result<usize> {
-    ensure_semantic(conn, embedder.dim() as u32)?;
-    let ids: Vec<i64> = {
-        let mut stmt = conn.prepare("SELECT id FROM notes WHERE materialized = 1")?;
-        let rows = stmt.query_map([], |r| r.get(0))?;
-        rows.collect::<std::result::Result<_, _>>()?
-    };
-    let mut total = 0;
-    for id in ids {
-        total += index_note_embeddings(conn, embedder, id)?;
-    }
-    Ok(total)
 }
 
 /// Notes that have content but no embeddings yet (new, or edited since they
@@ -302,7 +293,7 @@ mod tests {
         let conn = db::open_in_memory().unwrap();
         index::reindex_all(&conn, dir.path()).unwrap();
         let embedder = Embedder::from_dir(&default_model_dir()).unwrap();
-        embed_all(&conn, &embedder).unwrap();
+        embed_pending(&conn, &embedder).unwrap();
         (dir, conn, embedder)
     }
 

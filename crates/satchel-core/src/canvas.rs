@@ -81,17 +81,6 @@ pub fn serialize_canvas(canvas: &Canvas) -> Result<String> {
     Ok(serde_json::to_string_pretty(canvas)?)
 }
 
-/// Note/attachment paths referenced by `file` nodes — used to surface canvas
-/// links in the graph.
-pub fn file_refs(canvas: &Canvas) -> Vec<String> {
-    canvas
-        .nodes
-        .iter()
-        .filter(|n| n.node_type == "file")
-        .filter_map(|n| n.file.clone())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,12 +103,6 @@ mod tests {
         let serialized = serialize_canvas(&canvas).unwrap();
         let again = parse_canvas(&serialized).unwrap();
         assert_eq!(canvas, again, "structurally identical after round-trip");
-    }
-
-    #[test]
-    fn file_refs_lists_note_nodes() {
-        let canvas = parse_canvas(SAMPLE).unwrap();
-        assert_eq!(file_refs(&canvas), vec!["notes/idea.md".to_string()]);
     }
 
     #[test]

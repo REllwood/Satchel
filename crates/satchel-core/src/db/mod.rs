@@ -1,8 +1,9 @@
 //! SQLite index: connection setup, schema, and migrations.
 //!
-//! The database under `<vault>/.satchel/index.db` is a *derived cache* — it can
-//! be rebuilt from the vault at any time. The app is the single writer and runs
-//! in WAL mode so the CLI/MCP can read concurrently.
+//! The database (kept per machine, see [`crate::paths::index_db_path`]) is a
+//! *derived cache* — it can be rebuilt from the vault at any time. It runs in
+//! WAL mode so the app, the CLI and the MCP server can share it, and every
+//! multi-step write goes through [`atomically`].
 
 use std::path::Path;
 use std::time::Duration;
@@ -134,6 +135,40 @@ fn migrate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Run `f` so that its writes land together or not at all. The outermost call
+/// opens a transaction that takes the write lock at the start, so it cannot
+/// fail half-way for want of the lock. A call made inside it uses a savepoint,
+/// so an error undoes only that call's writes and the outer work goes on.
+pub fn atomically<T>(conn: &Connection, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let outer = conn.is_autocommit();
+    conn.execute_batch(if outer { "BEGIN IMMEDIATE" } else { "SAVEPOINT atomically" })?;
+    let mut undo = Undo { conn, outer, armed: true };
+    let value = f()?;
+    conn.execute_batch(if outer { "COMMIT" } else { "RELEASE atomically" })?;
+    undo.armed = false;
+    Ok(value)
+}
+
+/// Rolls back an [`atomically`] block that returned an error or panicked.
+struct Undo<'a> {
+    conn: &'a Connection,
+    outer: bool,
+    armed: bool,
+}
+
+impl Drop for Undo<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let sql = if self.outer {
+                "ROLLBACK"
+            } else {
+                "ROLLBACK TO atomically; RELEASE atomically"
+            };
+            let _ = self.conn.execute_batch(sql);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +232,77 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hits, 1, "FTS trigger should index the inserted note");
+    }
+
+    fn paths(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn.prepare("SELECT rel_path FROM notes ORDER BY rel_path").unwrap();
+        stmt.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
+    }
+
+    fn insert(conn: &Connection, rel: &str) -> Result<()> {
+        conn.execute("INSERT INTO notes (rel_path) VALUES (?1)", [rel])?;
+        Ok(())
+    }
+
+    #[test]
+    fn atomically_commits_or_undoes_all_of_its_writes() {
+        let conn = open_in_memory().unwrap();
+        atomically(&conn, || insert(&conn, "a.md")).unwrap();
+        let failed = atomically(&conn, || -> Result<()> {
+            insert(&conn, "b.md")?;
+            anyhow::bail!("stopped half-way")
+        });
+        assert!(failed.is_err());
+        assert_eq!(paths(&conn), ["a.md"]);
+        assert!(conn.is_autocommit(), "no transaction is left open");
+    }
+
+    #[test]
+    fn a_failed_inner_block_undoes_only_its_own_writes() {
+        let conn = open_in_memory().unwrap();
+        atomically(&conn, || {
+            insert(&conn, "a.md")?;
+            let inner = atomically(&conn, || {
+                insert(&conn, "b.md")?;
+                insert(&conn, "a.md") // duplicate path: fails
+            });
+            assert!(inner.is_err());
+            insert(&conn, "c.md")
+        })
+        .unwrap();
+        assert_eq!(paths(&conn), ["a.md", "c.md"]);
+        assert!(conn.is_autocommit());
+    }
+
+    #[test]
+    fn a_panic_rolls_back() {
+        let conn = open_in_memory().unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            atomically(&conn, || -> Result<()> {
+                insert(&conn, "a.md")?;
+                panic!("bug")
+            })
+        }));
+        assert!(result.is_err());
+        assert!(paths(&conn).is_empty());
+        assert!(conn.is_autocommit());
+    }
+
+    #[test]
+    fn a_writer_waits_for_another_connections_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        let first = open(&path).unwrap();
+        let second = open(&path).unwrap();
+        second.busy_timeout(Duration::from_millis(50)).unwrap();
+        atomically(&first, || {
+            insert(&first, "a.md")?;
+            // The second writer cannot start while the first holds the lock.
+            assert!(atomically(&second, || insert(&second, "b.md")).is_err());
+            Ok(())
+        })
+        .unwrap();
+        atomically(&second, || insert(&second, "b.md")).unwrap();
+        assert_eq!(paths(&first), ["a.md", "b.md"]);
     }
 }

@@ -172,6 +172,61 @@ fn mcp_creates_visible_notes_in_folders_and_pages_the_list() {
 }
 
 #[test]
+fn mcp_edits_and_appends_to_existing_notes_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir(root.join("Projects")).unwrap();
+    fs::write(root.join("Projects/Plan.md"), "# Plan\r\n\r\n- milk\r\n- eggs\r\n").unwrap();
+    fs::write(root.join("board.canvas"), "{}").unwrap();
+    fs::create_dir(root.join(".obsidian")).unwrap();
+    fs::write(root.join(".obsidian/notes.md"), "- milk").unwrap();
+    fs::write(outside.path().join("secret.md"), "- milk").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.path(), root.join("linked")).unwrap();
+
+    let call = |id: u32, name: &str, args: serde_json::Value| {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": { "name": name, "arguments": args }
+        })
+        .to_string()
+    };
+    let edit = |path: &str| serde_json::json!({ "path": path, "old_text": "- milk", "new_text": "- oat milk" });
+    let lines = [
+        call(1, "edit_note", serde_json::json!({ "path": "Projects/Plan.md", "old_text": "- milk\n- eggs", "new_text": "- milk\n- bread" })),
+        call(2, "append_to_note", serde_json::json!({ "path": "./Projects/Plan.md", "content": "- zucchini" })),
+        call(3, "search_notes", serde_json::json!({ "query": "zucchini" })),
+        call(4, "edit_note", serde_json::json!({ "path": "Projects/Plan.md", "old_text": "- tea", "new_text": "x" })),
+        call(5, "edit_note", edit("projects/plan.md")),
+        call(6, "edit_note", edit("Projects/Missing.md")),
+        call(7, "edit_note", edit("board.canvas")),
+        call(8, "edit_note", edit(".obsidian/notes.md")),
+        call(9, "edit_note", edit("linked/secret.md")),
+        call(10, "append_to_note", serde_json::json!({ "path": "../secret.md", "content": "x" })),
+    ];
+    let lines: Vec<&[u8]> = lines.iter().map(|l| l.as_bytes()).collect();
+    let replies = mcp_exchange(root, &lines);
+
+    assert_eq!(tool_text(&replies[0]), "Edited Projects/Plan.md: 1 replacement.");
+    assert_eq!(tool_text(&replies[1]), "Added to the end of Projects/Plan.md.");
+    assert_eq!(
+        fs::read_to_string(root.join("Projects/Plan.md")).unwrap(),
+        "# Plan\r\n\r\n- milk\r\n- bread\r\n- zucchini\r\n",
+        "edits keep the note's Windows line endings"
+    );
+    assert!(tool_text(&replies[2]).contains("Projects/Plan.md"), "the index sees the edit");
+    for reply in &replies[3..] {
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+    }
+    assert!(tool_text(&replies[3]).contains("not found in the note"));
+    assert_eq!(fs::read_to_string(root.join("board.canvas")).unwrap(), "{}");
+    assert_eq!(fs::read_to_string(root.join(".obsidian/notes.md")).unwrap(), "- milk");
+    assert_eq!(fs::read_to_string(outside.path().join("secret.md")).unwrap(), "- milk");
+    assert!(!root.join("Projects/Missing.md").exists());
+}
+
+#[test]
 fn a_missing_vault_folder_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("not mounted");

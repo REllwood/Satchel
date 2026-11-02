@@ -26,7 +26,7 @@ Everything here is just files — safe to read and edit directly.
 
 ## Driving Satchel from an agent
 The Satchel app is also an MCP server (search, semantic search, read-only SQL,
-read and create notes) — run it as `<Satchel app binary> mcp --vault "<this folder>"`.
+and reading, creating and editing notes) — run it as `<Satchel app binary> mcp --vault "<this folder>"`.
 In Satchel, **Settings → AI tools** copies the exact command for this computer.
 - **Claude Code**: `claude mcp add --transport stdio satchel -- <Satchel app binary> mcp --vault "<this folder>"`
 - **Codex**: add to `~/.codex/config.toml`:

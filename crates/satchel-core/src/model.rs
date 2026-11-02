@@ -3,9 +3,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// SQLite rowid for a note.
-pub type NoteId = i64;
-
 /// A heading extracted from a note body.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Heading {
@@ -54,52 +51,6 @@ pub struct ParsedNote {
     pub plaintext: String,
 }
 
-/// A note as tracked in the vault and index.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Note {
-    pub id: NoteId,
-    /// Path relative to the vault root, always forward-slashed.
-    pub rel_path: String,
-    pub title: String,
-    pub frontmatter: Value,
-    pub tags: Vec<String>,
-    /// Modification time, unix milliseconds.
-    pub mtime: i64,
-    pub size: u64,
-    /// blake3 hex digest of the file's bytes — the source of truth for change
-    /// detection (mtime is unreliable under cloud sync).
-    pub hash: String,
-}
-
-/// A non-note file referenced by notes (image or other attachment).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Attachment {
-    pub rel_path: String,
-    pub mime: Option<String>,
-}
-
-/// Per-vault configuration, persisted in `.satchel/settings.json`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct VaultConfig {
-    /// Folder (relative to vault) new attachments are written to.
-    pub attachments_dir: String,
-    /// Embedding model id (drives semantic search; a change forces re-index).
-    pub embedding_model: String,
-    /// Embedding dimensionality.
-    pub embedding_dim: u32,
-}
-
-impl Default for VaultConfig {
-    fn default() -> Self {
-        Self {
-            attachments_dir: "attachments".to_string(),
-            embedding_model: "all-MiniLM-L6-v2".to_string(),
-            embedding_dim: 384,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,12 +74,5 @@ mod tests {
         let json = serde_json::to_string(&parsed).unwrap();
         let back: ParsedNote = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, back);
-    }
-
-    #[test]
-    fn vault_config_defaults_are_sane() {
-        let c = VaultConfig::default();
-        assert_eq!(c.embedding_dim, 384);
-        assert_eq!(c.attachments_dir, "attachments");
     }
 }

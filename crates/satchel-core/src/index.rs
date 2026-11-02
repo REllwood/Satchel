@@ -8,9 +8,15 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::db;
 use crate::model::LinkKind;
 use crate::parse;
 use crate::vault::{self, ScannedNote};
+
+/// Notes indexed per transaction in a full scan or a large watcher batch.
+/// Committing in batches keeps the write lock short, so the MCP server or CLI
+/// writing to the same index waits well under its five-second timeout.
+const BATCH: usize = 500;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IndexStats {
@@ -66,7 +72,15 @@ pub fn index_note(conn: &Connection, note: &ScannedNote) -> Result<i64> {
 
 /// [`index_note`], also reporting whether the index changed (a new row, or new
 /// content), so callers can skip re-resolving links when nothing did.
+///
+/// A note's row, links, tags and attachments change together. An error
+/// part-way through would otherwise leave the new hash beside the old links,
+/// and every later scan would take that half-indexed note as up to date.
 fn index_note_changed(conn: &Connection, note: &ScannedNote) -> Result<(i64, bool)> {
+    db::atomically(conn, || replace_note_rows(conn, note))
+}
+
+fn replace_note_rows(conn: &Connection, note: &ScannedNote) -> Result<(i64, bool)> {
     // (id, hash, materialized, mtime, size)
     let existing: Option<(i64, String, bool, i64, i64)> = conn
         .query_row(
@@ -134,7 +148,7 @@ fn index_note_changed(conn: &Connection, note: &ScannedNote) -> Result<(i64, boo
 
     // Content changed: drop stale embeddings so they get rebuilt (by the
     // background embedder, or right away by a caller that has one loaded).
-    crate::db::vec::delete_note_vectors(conn, id)?;
+    db::vec::delete_note_vectors(conn, id)?;
     conn.execute("DELETE FROM chunks WHERE note_id = ?1", [id])?;
 
     // Replace links / tags / attachments for this note.
@@ -256,14 +270,25 @@ fn remove_note_changed(conn: &Connection, rel_path: &str) -> Result<bool> {
     let Some(id) = note_id_by_path(conn, rel_path)? else {
         return Ok(false);
     };
-    crate::db::vec::delete_note_vectors(conn, id)?;
-    conn.execute("DELETE FROM notes WHERE id = ?1", [id])?;
+    db::atomically(conn, || delete_note_rows(conn, id))?;
     Ok(true)
+}
+
+/// Delete a note's row (cascading to its links, tags, attachments and
+/// chunks) and its vectors.
+fn delete_note_rows(conn: &Connection, id: i64) -> Result<()> {
+    db::vec::delete_note_vectors(conn, id)?;
+    conn.execute("DELETE FROM notes WHERE id = ?1", [id])?;
+    Ok(())
 }
 
 /// Resolve every link's `target` to a note id where possible. Priority:
 /// exact relative path → filename stem → title (all case-insensitive).
 pub fn resolve_links(conn: &Connection) -> Result<()> {
+    db::atomically(conn, || resolve_all_links(conn))
+}
+
+fn resolve_all_links(conn: &Connection) -> Result<()> {
     let mut by_relpath: HashMap<String, i64> = HashMap::new();
     let mut by_stem: HashMap<String, i64> = HashMap::new();
     let mut by_title: HashMap<String, i64> = HashMap::new();
@@ -379,11 +404,13 @@ fn index_path(conn: &Connection, root: &Path, rel_path: &str) -> Result<(Option<
 /// links if anything changed. Used after in-app edits. Returns `None` for a
 /// path that is gone or is not a note.
 pub fn index_single(conn: &Connection, root: &Path, rel_path: &str) -> Result<Option<i64>> {
-    let (id, changed) = index_path(conn, root, rel_path)?;
-    if changed {
-        resolve_links(conn)?;
-    }
-    Ok(id)
+    db::atomically(conn, || {
+        let (id, changed) = index_path(conn, root, rel_path)?;
+        if changed {
+            resolve_links(conn)?;
+        }
+        Ok(id)
+    })
 }
 
 /// Index a batch of changed paths, such as one file watcher report, then
@@ -391,10 +418,15 @@ pub fn index_single(conn: &Connection, root: &Path, rel_path: &str) -> Result<Op
 /// example, a file removed mid-read) is skipped so it cannot hold up the rest.
 pub fn index_paths<S: AsRef<str>>(conn: &Connection, root: &Path, rel_paths: &[S]) -> Result<()> {
     let mut changed = false;
-    for rel_path in rel_paths {
-        if let Ok((_, c)) = index_path(conn, root, rel_path.as_ref()) {
-            changed |= c;
-        }
+    for batch in rel_paths.chunks(BATCH) {
+        db::atomically(conn, || {
+            for rel_path in batch {
+                if let Ok((_, c)) = index_path(conn, root, rel_path.as_ref()) {
+                    changed |= c;
+                }
+            }
+            Ok(())
+        })?;
     }
     if changed {
         resolve_links(conn)?;
@@ -449,58 +481,68 @@ pub fn apply_scan(conn: &Connection, scan: &vault::VaultScan) -> Result<IndexSta
     // cloud-only files) or the same content.
     let mut changed = false;
     let mut moved: HashSet<&str> = HashSet::new();
-    for note in scanned.iter().filter(|n| !known.contains(n.rel_path.as_str())) {
-        let name = note.rel_path.rsplit('/').next().unwrap_or(&note.rel_path);
-        let candidates: Vec<usize> = vanished
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, _, _, mtime, size))| *mtime == note.mtime_ms && *size == note.size as i64)
-            .map(|(i, _)| i)
-            .collect();
-        let found = candidates.iter().copied().find(|&i| {
-            let (rel, _, hash, ..) = vanished[i];
-            rel.rsplit('/').next() == Some(name)
-                || (candidates.len() == 1
-                    && note.materialized
-                    && std::fs::read(&note.abs_path).is_ok_and(|b| vault::content_hash(&b) == *hash))
-        });
-        if let Some(i) = found {
-            let (_, id, ..) = vanished.remove(i);
-            conn.execute("UPDATE notes SET rel_path = ?2 WHERE id = ?1", params![id, note.rel_path])?;
-            moved.insert(note.rel_path.as_str());
-            stats.moved += 1;
-            changed = true;
+    db::atomically(conn, || {
+        for note in scanned.iter().filter(|n| !known.contains(n.rel_path.as_str())) {
+            let name = note.rel_path.rsplit('/').next().unwrap_or(&note.rel_path);
+            let candidates: Vec<usize> = vanished
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, _, _, mtime, size))| *mtime == note.mtime_ms && *size == note.size as i64)
+                .map(|(i, _)| i)
+                .collect();
+            let found = candidates.iter().copied().find(|&i| {
+                let (rel, _, hash, ..) = vanished[i];
+                rel.rsplit('/').next() == Some(name)
+                    || (candidates.len() == 1
+                        && note.materialized
+                        && std::fs::read(&note.abs_path).is_ok_and(|b| vault::content_hash(&b) == *hash))
+            });
+            if let Some(i) = found {
+                let (_, id, ..) = vanished.remove(i);
+                conn.execute("UPDATE notes SET rel_path = ?2 WHERE id = ?1", params![id, note.rel_path])?;
+                moved.insert(note.rel_path.as_str());
+                stats.moved += 1;
+                changed = true;
+            }
         }
-    }
+        Ok(())
+    })?;
 
-    for note in scanned {
-        let rel = note.rel_path.as_str();
-        match index_note_changed(conn, note) {
-            Ok((_, c)) => {
-                changed |= c;
-                if moved.contains(rel) {
-                    // Counted as moved already.
-                } else if !known.contains(rel) {
-                    stats.added += 1;
-                } else if c {
-                    stats.updated += 1;
-                } else {
-                    stats.unchanged += 1;
+    for batch in scanned.chunks(BATCH) {
+        db::atomically(conn, || {
+            for note in batch {
+                let rel = note.rel_path.as_str();
+                match index_note_changed(conn, note) {
+                    Ok((_, c)) => {
+                        changed |= c;
+                        if moved.contains(rel) {
+                            // Counted as moved already.
+                        } else if !known.contains(rel) {
+                            stats.added += 1;
+                        } else if c {
+                            stats.updated += 1;
+                        } else {
+                            stats.unchanged += 1;
+                        }
+                    }
+                    Err(_) => stats.skipped += 1,
                 }
             }
-            Err(_) => stats.skipped += 1,
+            Ok(())
+        })?;
+    }
+
+    db::atomically(conn, || {
+        for (rel, ..) in &vanished {
+            remove_note(conn, rel)?;
+            stats.removed += 1;
+            changed = true;
         }
-    }
-
-    for (rel, ..) in vanished {
-        remove_note(conn, rel)?;
-        stats.removed += 1;
-        changed = true;
-    }
-
-    if changed {
-        resolve_links(conn)?;
-    }
+        if changed {
+            resolve_links(conn)?;
+        }
+        Ok(())
+    })?;
     Ok(stats)
 }
 
@@ -553,40 +595,45 @@ pub fn note_ids_in_folder(conn: &Connection, dir: &str) -> Result<Vec<i64>> {
 /// matters most for a note whose contents are only in the cloud. Returns the
 /// note's id at the new path, if `to` is a note.
 pub fn rename_note(conn: &Connection, root: &Path, from: &str, to: &str) -> Result<Option<i64>> {
-    if from != to && vault::is_markdown(to) && !vault::is_hidden_path(to) {
-        if let Some(id) = note_id_by_path(conn, from)? {
-            // A case-only rename on a case-insensitive disk has no other row
-            // at `to`. Any row that is there is stale.
-            if note_id_by_path(conn, to)?.is_some_and(|other| other != id) {
-                remove_note(conn, to)?;
+    db::atomically(conn, || {
+        if from != to && vault::is_markdown(to) && !vault::is_hidden_path(to) {
+            if let Some(id) = note_id_by_path(conn, from)? {
+                // A case-only rename on a case-insensitive disk has no other
+                // row at `to`. Any row that is there is stale.
+                if note_id_by_path(conn, to)?.is_some_and(|other| other != id) {
+                    remove_note(conn, to)?;
+                }
+                conn.execute("UPDATE notes SET rel_path = ?2 WHERE id = ?1", params![id, to])?;
             }
-            conn.execute("UPDATE notes SET rel_path = ?2 WHERE id = ?1", params![id, to])?;
         }
-    }
-    index_path(conn, root, from)?;
-    let (id, _) = index_path(conn, root, to)?;
-    resolve_links(conn)?;
-    Ok(id)
+        index_path(conn, root, from)?;
+        let (id, _) = index_path(conn, root, to)?;
+        resolve_links(conn)?;
+        Ok(id)
+    })
 }
 
 /// Record that folder `from` was renamed or moved to `to`: every note in it
 /// keeps its index row under the new path.
 pub fn rename_folder(conn: &Connection, from: &str, to: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE notes SET rel_path = ?2 || substr(rel_path, length(?1) + 1)
-         WHERE substr(rel_path, 1, length(?1) + 1) = ?1 || '/'",
-        params![from, to],
-    )?;
-    resolve_links(conn)
+    db::atomically(conn, || {
+        conn.execute(
+            "UPDATE notes SET rel_path = ?2 || substr(rel_path, length(?1) + 1)
+             WHERE substr(rel_path, 1, length(?1) + 1) = ?1 || '/'",
+            params![from, to],
+        )?;
+        resolve_links(conn)
+    })
 }
 
 /// Drop every note in folder `dir` from the index (after it was deleted).
 pub fn remove_folder(conn: &Connection, dir: &str) -> Result<()> {
-    for id in note_ids_in_folder(conn, dir)? {
-        crate::db::vec::delete_note_vectors(conn, id)?;
-        conn.execute("DELETE FROM notes WHERE id = ?1", [id])?;
-    }
-    resolve_links(conn)
+    db::atomically(conn, || {
+        for id in note_ids_in_folder(conn, dir)? {
+            delete_note_rows(conn, id)?;
+        }
+        resolve_links(conn)
+    })
 }
 
 /// After notes moved, rewrite links in other notes that named them by file
@@ -781,7 +828,6 @@ fn contains_phrase(haystack: &str, needle: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db;
     use std::fs;
 
     fn fixture() -> (tempfile::TempDir, Connection) {
@@ -1214,5 +1260,84 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hits, 1, "frontmatter value should be searchable");
+    }
+
+    fn tags_of(conn: &Connection, rel: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT tag FROM tags JOIN notes n ON n.id = note_id WHERE n.rel_path = ?1 ORDER BY tag")
+            .unwrap();
+        stmt.query_map([rel], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
+    }
+
+    /// Make inserting the tag `boom` fail, part-way through indexing a note.
+    fn fail_on_tag_boom(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER boom BEFORE INSERT ON main.tags WHEN NEW.tag = 'boom'
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_note_that_fails_half_way_keeps_its_previous_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.md"), "# A\n\nold #before").unwrap();
+        fs::write(root.join("b.md"), "# B\n\nold").unwrap();
+        let conn = db::open_in_memory().unwrap();
+        reindex_all(&conn, root).unwrap();
+        let before: String = conn
+            .query_row("SELECT hash FROM notes WHERE rel_path = 'a.md'", [], |r| r.get(0))
+            .unwrap();
+
+        fail_on_tag_boom(&conn);
+        fs::write(root.join("a.md"), "# A\n\nnew and longer text #boom").unwrap();
+        fs::write(root.join("b.md"), "# B\n\nnew and longer text").unwrap();
+        let stats = reindex_all(&conn, root).unwrap();
+        assert_eq!((stats.skipped, stats.updated), (1, 1), "{stats:?}");
+        let after: String = conn
+            .query_row("SELECT hash FROM notes WHERE rel_path = 'a.md'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after, before, "the failed note keeps its old hash");
+        assert_eq!(tags_of(&conn, "a.md"), ["before"], "and its old tags");
+        assert!(conn.is_autocommit());
+
+        // The next scan sees the note as changed and indexes it.
+        conn.execute_batch("DROP TRIGGER boom").unwrap();
+        let stats = reindex_all(&conn, root).unwrap();
+        assert_eq!(stats.updated, 1, "{stats:?}");
+        assert_eq!(tags_of(&conn, "a.md"), ["boom"]);
+    }
+
+    #[test]
+    fn a_watcher_batch_skips_a_failed_note_without_partial_writes() {
+        let (dir, conn) = fixture();
+        let root = dir.path();
+        reindex_all(&conn, root).unwrap();
+        fail_on_tag_boom(&conn);
+        fs::write(root.join("alpha.md"), "# Alpha\n\nnow #boom").unwrap();
+        fs::write(root.join("beta.md"), "# Beta\n\nnow #fine").unwrap();
+        index_paths(&conn, root, &["alpha.md", "beta.md"]).unwrap();
+        assert_eq!(tags_of(&conn, "alpha.md"), ["inline", "t1"]);
+        assert_eq!(tags_of(&conn, "beta.md"), ["fine"]);
+        assert!(conn.is_autocommit());
+    }
+
+    #[test]
+    fn large_scans_are_committed_in_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let count = BATCH * 2 + 7;
+        for i in 0..count {
+            fs::write(root.join(format!("n{i}.md")), format!("# N{i}\n\nlinks to [[n0]]")).unwrap();
+        }
+        let conn = db::open_in_memory().unwrap();
+        let stats = reindex_all(&conn, root).unwrap();
+        assert_eq!(stats.added, count);
+        let resolved: i64 = conn
+            .query_row("SELECT count(*) FROM links WHERE resolved = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(resolved as usize, count);
+        assert!(conn.is_autocommit());
     }
 }
